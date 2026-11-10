@@ -16,22 +16,27 @@ set DL $HOME/Downloads/"Red and Blue"/"Zip Files"
    git config user.name "jackbashroot-boop"
    git config user.email "jackbashroot-boop@users.noreply.github.com"
    git add -A
-   git commit -m "Suite v1.2.3 - Companion 1.7.4 Settings/Dashboard scroll fix (close/single-instance/uninstall fixes, repo updater, PHOENIX 0.9.9, BENCH/LANTERN 0.1.3, HERALD 0.1.5)"
+   git commit -m "Suite v1.2.4 - PHOENIX v0.10.0 Wi-Fi self-update, Companion 1.7.5 vertical Settings (close/single-instance/uninstall fixes, repo updater, BENCH/LANTERN 0.1.3, HERALD 0.1.5)"
    git push
 
    (The git config lines fix "Author identity unknown". They are
    LOCAL to this repo - never share any password/token instead.)
 
 2) Publish the release the Companion updater reads:
-   unzip -o "$DL/Aegis-Release-v1.2.3-Assets.zip" -d "$DL/release-v1.2.3"
-   gh release create v1.2.3 "$DL"/release-v1.2.3/* --title "AEGIS Suite v1.2.3" --notes "Settings scroll fix; close/uninstall fixes; repo updater; PHOENIX auto-join."
-   gh release upload v1.2.1 "$DL/AEGIS-KEEP-ARCHIVE-v1.2.3.zip"   # optional restore-everything archive
+   unzip -o "$DL/Aegis-Release-v1.2.4-Assets.zip" -d "$DL/release-v1.2.4"
+   gh release create v1.2.4 "$DL"/release-v1.2.4/* --title "AEGIS Suite v1.2.4" --notes "PHOENIX Wi-Fi self-update; Settings stack; close/uninstall fixes."
+   gh release upload v1.2.1 "$DL/AEGIS-KEEP-ARCHIVE-v1.2.4.zip"   # optional restore-everything archive
 
-3) Visibility: Companion checks releases/latest/download/latest.json
-   anonymously. PRIVATE repo = 404 = no updates. Either make the
-   repo public, or paste a read-only GitHub token into Companion >
-   Settings > Updates & removal (stored only in your local config).
+3) Visibility: Companion AND PHOENIX check releases/latest/download/
+   (latest.json / phoenix-latest.json) anonymously. PRIVATE repo =
+   404 = no updates for either. The repo must be PUBLIC for the
+   Cardputer to self-update (it carries no token, by design); the
+   Companion-only token option in Settings still exists as well.
+   The v1.2.4 release folder has FIVE files: both suite installers,
+   latest.json, phoenix-latest.json, aegis-phoenix-adv.bin. Future
+   PHOENIX-only updates: bump phoenix-latest.json + swap the .bin
+   in a new release; devices pick it up on home Wi-Fi.
 
 4) Verify: reboot Companion - Dashboard health should show
    "Updates ... checked against the repo", and Settings > Check
-   for updates should say you are up to date on v1.7.4.
+   for updates should say you are up to date on v1.7.5.
