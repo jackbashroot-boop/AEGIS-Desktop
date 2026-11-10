@@ -1,0 +1,11 @@
+export GOROOT=/tmp/gosdk/go
+export GOPATH=/tmp/gopath
+export PATH=$GOROOT/bin:$PATH
+export CGO_ENABLED=1
+export GOFLAGS=-mod=mod
+export GOSUMDB=off
+export PKG_CONFIG_PATH=/tmp/native/usr/lib/x86_64-linux-gnu/pkgconfig:/tmp/native/usr/share/pkgconfig
+export CGO_LDFLAGS="-L/tmp/native/usr/lib/x86_64-linux-gnu"
+export LD_LIBRARY_PATH=/tmp/native/usr/lib/x86_64-linux-gnu
+export CGO_CFLAGS="-I/tmp/native/usr/include"
+export GOTMPDIR=/home/user/.gotmp

@@ -276,7 +276,11 @@ func (p *areaProgress) Start(root string, homeLat, homeLon float64, token string
 // cache - it never touches the network. Missing squares stay
 // transparent and the result is marked Partial.
 func buildTileSetCached(root string, d MapData, zoomDelta int, area OfflineArea) *tileSet {
-	minLat, minLon, maxLat, maxLon := mapBounds(d)
+	return buildTileSetCachedFB(root, d, zoomDelta, area, 0, 0, false)
+}
+
+func buildTileSetCachedFB(root string, d MapData, zoomDelta int, area OfflineArea, fbLat, fbLon float64, fbOK bool) *tileSet {
+	minLat, minLon, maxLat, maxLon := viewBounds(d, fbLat, fbLon, fbOK)
 	if !finite4(minLat, minLon, maxLat, maxLon) {
 		return &tileSet{Err: true}
 	}

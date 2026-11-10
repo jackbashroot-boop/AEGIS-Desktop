@@ -1,5 +1,5 @@
 ====================================================================
-  AEGIS v1.2.14 - PUSH SOURCES + PUBLISH RELEASE (CachyOS / fish)
+  AEGIS v1.2.17 - PUSH SOURCES + PUBLISH RELEASE (CachyOS / fish)
   Repo: https://github.com/jackbashroot-boop/AEGIS-Desktop
 ====================================================================
 
@@ -10,36 +10,36 @@ set DL $HOME/Downloads/"Red and Blue"/"Zip Files"
 
 --- A) Push the source tree (one time per version) -------------------
 test -d $HOME/aegis-repo/.git; or git clone https://github.com/jackbashroot-boop/AEGIS-Desktop.git $HOME/aegis-repo
-unzip -o "$DL/aegis-repo-upload-v1.2.14.zip" -d /tmp/aegis-new
+unzip -o "$DL/aegis-repo-upload-v1.2.17.zip" -d /tmp/aegis-new
 cp -r /tmp/aegis-new/. $HOME/aegis-repo/
 cd $HOME/aegis-repo
 git config user.name "jackbashroot-boop"
 git config user.email "jackbashroot-boop@users.noreply.github.com"
 git add -A
 git status
-git commit -m "Suite 1.2.14 - Companion 1.8.4, PHOENIX 0.12.7: GPS location accuracy (multi-fix estimates, jump rejection, honest +/- radii), readiness report, triple brutal-test pass"
+git commit -m "Suite 1.2.17 - Companion 1.8.7, PHOENIX 0.12.10: GPS location accuracy (multi-fix estimates, jump rejection, honest +/- radii), readiness report, triple brutal-test pass"
 git push
 
 --- B) Publish the release the updater reads (5 files) ---------------
 cd $DL
-unzip -o Aegis-Release-v1.2.14-FILES.zip -d release-v1.2.14
-ls release-v1.2.14
-gh release create v1.2.14 release-v1.2.14/* -R jackbashroot-boop/AEGIS-Desktop --title "AEGIS Suite v1.2.14" --notes "Companion 1.8.4 + PHOENIX 0.12.7: location accuracy overhaul, field readiness report, brutal-test x3 verified."
+unzip -o Aegis-Release-v1.2.17-FILES.zip -d release-v1.2.17
+ls release-v1.2.17
+gh release create v1.2.17 release-v1.2.17/* -R jackbashroot-boop/AEGIS-Desktop --title "AEGIS Suite v1.2.17" --notes "Companion 1.8.7 + PHOENIX 0.12.10: location accuracy overhaul, field readiness report, brutal-test x3 verified."
 
 --- C) From NEXT release on, GitHub can build it for you -------------
 The repo now carries .github/workflows/release.yml + ci/release_build.py.
 After A) is pushed once:
-  git tag v1.2.15
-  git push origin v1.2.15
+  git tag v1.2.17
+  git push origin v1.2.17
 GitHub Actions builds Companion + PHOENIX and publishes the Release.
 (First tag push is the workflow's real-world test - watch the Actions tab.
 The Companion's Settings > Publish staged PHOENIX button also still works
 for firmware-only drops onto the latest release, using your own gh login.)
 
 --- D) Verify ---------------------------------------------------------
-1. Companion: Dashboard > Update everything (it self-updates to 1.8.4).
-2. Cardputer on home Wi-Fi: accept the PHOENIX 0.12.7 offer with ENTER.
-3. PHOENIX SETUP shows "Firmware - PHOENIX v0.12.7"; CAP screen shows
+1. Companion: Dashboard > Update everything (it self-updates to 1.8.7).
+2. Cardputer on home Wi-Fi: accept the PHOENIX 0.12.10 offer with ENTER.
+3. PHOENIX SETUP shows "Firmware - PHOENIX v0.12.10"; CAP screen shows
    Sats/HDOP/+/- metres when the GNSS cap has a fix.
 4. Companion Settings > About > Save field readiness report - hand that
    file back if anything looks wrong. It contains no secrets.

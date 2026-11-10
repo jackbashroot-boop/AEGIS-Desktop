@@ -535,6 +535,9 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 	if u.btnRegenTok.Clicked(gtx) {
 		cfg.Token = newToken()
 		_ = cfg.Save()
+		if u.core.Disco != nil {
+			u.core.Disco.SetToken(cfg.Token) // discovery used to keep the old token forever (v1.8.6)
+		}
 		u.settingsMsg = "New token generated. Devices will be REJECTED until you re-write AEGIS_LINK/desktop.txt to their SD cards (button below)."
 		u.core.Log.Warnf("sync token regenerated from Settings - SD cards need the new desktop.txt")
 	}

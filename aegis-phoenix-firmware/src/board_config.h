@@ -19,7 +19,9 @@
 #define AEGIS_LORA_SF         9
 #define AEGIS_LORA_CR         7      // 4/7
 #define AEGIS_LORA_SYNC       0x12   // private networks
-#define AEGIS_LORA_PWR_DBM    14     // keep legal for your region; RX-first design
+#define AEGIS_LORA_PWR_DBM    22     // v0.12.9: SX1262 max (+22 dBm). Battery math is kind: TX only fires for a
+                                     // ~0.3 s beacon every 10 min (~120 mA peaks) - about 0.6 mAh/day.
+                                     // Listening (the dominant draw) is unchanged. Legal on US915; check your region.
 #define AEGIS_LORA_TCXO_V     1.8f
 
 // Cap LoRa-1262 - ATGM336H-6N GNSS, UART1 @ 115200 8N1.

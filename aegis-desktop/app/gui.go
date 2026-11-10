@@ -155,6 +155,7 @@ type UI struct {
 	tilesBusy     string
 	btnMapWeb     widget.Clickable
 	btnMapGMaps   widget.Clickable
+	btnMapShare   widget.Clickable
 	btnMapRefresh widget.Clickable
 	mapData       *MapData
 	mapSize       int64

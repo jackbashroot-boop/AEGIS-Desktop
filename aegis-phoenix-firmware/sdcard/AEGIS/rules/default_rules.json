@@ -1,0 +1,17 @@
+{
+  "pack": "aegis-defaults",
+  "rules": [
+    {"code": "PHX-DEAUTH-001", "kind": "deauth_flood", "severity": "high",
+     "expression": "wifi.mgmt == 0xC0 && count(window=1s) >= 5"},
+    {"code": "PHX-TWIN-001", "kind": "evil_twin", "severity": "high",
+     "expression": "confidence >= 80"},
+    {"code": "PHX-ROGUE-001", "kind": "rogue_ap", "severity": "medium",
+     "expression": "confidence >= 50"},
+    {"code": "PHX-BLE-001", "kind": "ble_stalker", "severity": "medium",
+     "expression": "confidence >= 60"},
+    {"code": "PHX-KRACK-001", "kind": "wifi_krack", "severity": "high",
+     "expression": "wifi.eapol.msg == 3"},
+    {"code": "PHX-GNSS-001", "kind": "gnss_spoof", "severity": "high",
+     "expression": "gnss.spoof == true"}
+  ]
+}

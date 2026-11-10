@@ -55,6 +55,8 @@ func BuildMapHTML(d MapData) string {
 	}
 	ptsJSON, _ := json.Marshal(pts)
 	trkJSON, _ := json.Marshal(d.Track)
+	homeJSON, _ := json.Marshal([]float64{d.CenterLat, d.CenterLon})
+	estJSON, _ := json.Marshal(d.EstTrack)
 
 	var rows strings.Builder
 	for _, p := range d.Points {
@@ -99,6 +101,8 @@ Each pin is a location <b>estimate</b>: repeated GPS sightings are combined with
 <script>
 var pts = %s;
 var track = %s;
+var homeC = %s;
+var est = %s;
 function esc(s){return String(s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function col(r){return r>=-60?'#3ddc84':(r>=-75?'#ffb020':'#ff5252');}
 var map = L.map('map');
@@ -117,10 +121,14 @@ if(track && track.length>1){
   var line = L.polyline(track,{color:'#35d3f4',weight:3,opacity:0.85}).addTo(map);
   bounds = bounds.concat(track);
 }
-if(bounds.length){ map.fitBounds(bounds,{padding:[24,24]}); } else { map.setView([0,0],2); }
+if(est && est.length>1){
+  L.polyline(est,{color:'#ffb020',weight:2,opacity:0.8,dashArray:'6 6'}).addTo(map).bindPopup('Wi-Fi position estimates (no GPS fix - positioned from known networks)');
+  if(!bounds.length){ bounds = bounds.concat(est); }
+}
+if(bounds.length){ map.fitBounds(bounds,{padding:[24,24]}); } else if(homeC[0]||homeC[1]){ map.setView(homeC,9); L.circleMarker(homeC,{radius:8,color:'#ffb020',weight:2,fillColor:'#ffb020',fillOpacity:0.6}).addTo(map).bindPopup('<b>Home</b><br>Your 100x100-mile home map - no sightings here yet.'); } else { map.setView([0,0],2); }
 </script></body></html>`,
 		len(d.Points), len(d.Track), d.RouteKm, html.EscapeString(days),
-		rows.String(), ptsJSON, trkJSON)
+		rows.String(), ptsJSON, trkJSON, homeJSON, estJSON)
 }
 
 // WriteMapHTML regenerates the interactive map inside the library and

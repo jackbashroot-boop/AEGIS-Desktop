@@ -37,6 +37,22 @@ type Discovery struct {
 	found     map[string]*FoundDevice
 	pingNonce string
 	pingAt    time.Time
+
+	// Recent ping nonces (v1.8.6): a device may answer the previous
+	// shout just after we rotated to a new one; accepting only the
+	// newest nonce silently dropped those honest replies.
+	nonces []pingNonceRec
+	// Rejected AEGIS_CARD diagnostics (v1.8.6): proof failures used
+	// to vanish silently. Counted so the Dashboard can say WHY no
+	// device is showing (usually a stale token on the SD card).
+	cardRejects int
+	rejectIP    string
+	rejectAt    time.Time
+}
+
+type pingNonceRec struct {
+	nonce string
+	at    time.Time
 }
 
 // FoundDevice is one AEGIS device this Companion has located on
@@ -51,6 +67,17 @@ type FoundDevice struct {
 
 func NewDiscovery(token string, log *Log) *Discovery {
 	return &Discovery{token: token, log: log, lastBy: map[string]time.Time{}, seen: map[string]bool{}, found: map[string]*FoundDevice{}}
+}
+
+// SetToken swaps the shared secret live (v1.8.6). Discovery used to
+// keep the token from process start forever: regenerate the token
+// in Settings and every ping proof silently failed from then on -
+// devices still linked (the TCP server reads the live config) and
+// pushed updates fine, but "On your network" stayed empty forever.
+func (d *Discovery) SetToken(t string) {
+	d.mu.Lock()
+	d.token = t
+	d.mu.Unlock()
 }
 
 // discoveryMAC is the single source of truth for the reply proof;
@@ -135,6 +162,43 @@ func parseCard(pkt []byte) (prog, ver, mac, proof string, ok bool) {
 	return f[2], f[3], f[4], f[5], true
 }
 
+// proofOK reports whether an AEGIS_CARD proof matches any ping
+// nonce still inside its 90 s validity window (current or recent).
+func (d *Discovery) proofOK(proof string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.pingNonce != "" && time.Since(d.pingAt) < 90*time.Second && proof == pingMAC(d.token, d.pingNonce) {
+		return true
+	}
+	for _, n := range d.nonces {
+		if time.Since(n.at) < 90*time.Second && proof == pingMAC(d.token, n.nonce) {
+			return true
+		}
+	}
+	return false
+}
+
+// recordReject counts an AEGIS_CARD whose proof failed, so the UI
+// can explain an empty "On your network" list instead of hiding it.
+func (d *Discovery) recordReject(ip string) {
+	d.mu.Lock()
+	d.cardRejects++
+	n := d.cardRejects
+	d.rejectIP, d.rejectAt = ip, time.Now()
+	d.mu.Unlock()
+	if n == 1 || n%25 == 0 {
+		d.log.Warnf("discovery: AEGIS_CARD from %s REJECTED (security proof mismatch - token on its SD card differs from this PC's? re-write AEGIS_LINK from Settings > Connection) [%d total]", ip, n)
+	}
+}
+
+// Rejects returns the count and source of the latest rejected
+// AEGIS_CARD announcement (0 when none).
+func (d *Discovery) Rejects() (int, string, time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cardRejects, d.rejectIP, d.rejectAt
+}
+
 func (d *Discovery) noteFound(ip, prog, ver, mac string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -203,11 +267,10 @@ func (d *Discovery) loop(conn *net.UDPConn, done chan struct{}) {
 			}
 		}
 		if prog, ver, mac, proof, ok := parseCard(buf[:n]); ok {
-			d.mu.Lock()
-			nonce, at := d.pingNonce, d.pingAt
-			d.mu.Unlock()
-			if nonce != "" && time.Since(at) < 90*time.Second && proof == pingMAC(d.token, nonce) {
+			if d.proofOK(proof) {
 				d.noteFound(from.IP.String(), prog, ver, mac)
+			} else {
+				d.recordReject(from.IP.String())
 			}
 			continue
 		}
@@ -234,6 +297,64 @@ func (d *Discovery) loop(conn *net.UDPConn, done chan struct{}) {
 	}
 }
 
+// pingBroadcastAddrs returns every broadcast target worth shouting
+// on: the limited broadcast plus each up interface's subnet
+// broadcast. A lone 255.255.255.255 shout quietly dies on some
+// Windows / multi-homed / VPN setups, and then the Companion swears
+// no Cardputer exists (v1.8.5 link hardening).
+func pingBroadcastAddrs() []*net.UDPAddr {
+	seen := map[string]bool{}
+	var out []*net.UDPAddr
+	add := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		s := ip.String()
+		if seen[s] {
+			return
+		}
+		seen[s] = true
+		out = append(out, &net.UDPAddr{IP: ip, Port: 8791})
+	}
+	add(net.IPv4bcast)
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagBroadcast == 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil || ipnet.Mask == nil {
+				continue
+			}
+			mask4 := ipnet.Mask
+			if len(mask4) == 16 {
+				mask4 = mask4[12:]
+			}
+			if len(mask4) != 4 {
+				continue
+			}
+			bc := make(net.IP, 4)
+			for i := 0; i < 4; i++ {
+				bc[i] = ip4[i] | ^mask4[i]
+			}
+			add(bc)
+		}
+	}
+	return out
+}
+
 // pinger broadcasts AEGIS_PING every 15 s so link-carrying
 // Cardputers can announce themselves (see noteFound).
 func (d *Discovery) pinger(conn *net.UDPConn, done chan struct{}) {
@@ -245,9 +366,19 @@ func (d *Discovery) pinger(conn *net.UDPConn, done chan struct{}) {
 		nonce := hex.EncodeToString(raw[:])
 		d.mu.Lock()
 		d.pingNonce, d.pingAt = nonce, time.Now()
+		d.nonces = append(d.nonces, pingNonceRec{nonce, time.Now()})
+		kept := d.nonces[:0]
+		for _, n := range d.nonces {
+			if time.Since(n.at) < 2*time.Minute {
+				kept = append(kept, n)
+			}
+		}
+		d.nonces = kept
 		d.mu.Unlock()
-		_, _ = conn.WriteToUDP([]byte("AEGIS_PING 1 "+nonce+"\n"),
-			&net.UDPAddr{IP: net.IPv4bcast, Port: 8791})
+		payload := []byte("AEGIS_PING 1 " + nonce + "\n")
+		for _, addr := range pingBroadcastAddrs() {
+			_, _ = conn.WriteToUDP(payload, addr)
+		}
 	}
 	send()
 	t := time.NewTicker(15 * time.Second)

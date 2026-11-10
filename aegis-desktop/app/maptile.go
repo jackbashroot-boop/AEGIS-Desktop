@@ -121,8 +121,28 @@ func finite4(a, b, c, dd float64) bool {
 	return true
 }
 
+// viewBounds returns the extent the map should frame: the data's own
+// bounds when there is any, otherwise the full 100x100-mile home-map
+// square around the fallback centre (v1.8.5 - an empty drive used to
+// leave the map blank and depressing; the map is the map, sightings
+// just decorate it). fbOK=false means no fallback is known.
+func viewBounds(d MapData, fbLat, fbLon float64, fbOK bool) (minLat, minLon, maxLat, maxLon float64) {
+	minLat, minLon, maxLat, maxLon = mapBounds(d)
+	if finite4(minLat, minLon, maxLat, maxLon) {
+		return minLat, minLon, maxLat, maxLon
+	}
+	if fbOK {
+		return areaBounds(fbLat, fbLon, areaHalfMiles)
+	}
+	return minLat, minLon, maxLat, maxLon
+}
+
 func buildTileSet(root string, d MapData, zoomDelta int) *tileSet {
-	minLat, minLon, maxLat, maxLon := mapBounds(d)
+	return buildTileSetFB(root, d, zoomDelta, 0, 0, false)
+}
+
+func buildTileSetFB(root string, d MapData, zoomDelta int, fbLat, fbLon float64, fbOK bool) *tileSet {
+	minLat, minLon, maxLat, maxLon := viewBounds(d, fbLat, fbLon, fbOK)
 	if !finite4(minLat, minLon, maxLat, maxLon) {
 		return &tileSet{Err: true}
 	}

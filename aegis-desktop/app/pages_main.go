@@ -387,6 +387,9 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			found := u.core.Disco.Found()
 			if len(found) == 0 {
+				if n, ip, _ := u.core.Disco.Rejects(); n > 0 {
+					return u.label(11.5, colAmber, fmt.Sprintf("Heard %d announcement(s) from %s but the security proof did not match - the token on that SD card differs from this PC's. Fix: Settings > Connection > re-write AEGIS_LINK to the card (or regenerate the token there). This notice is why nothing is listed.", n, ip)).Layout(gtx)
+				}
 				return u.label(11.5, colDim, "None yet. A Cardputer appears here when it is on your Wi-Fi with the SD link file inserted (PHOENIX 0.12.2+ names itself by answering the ping; the others appear when they come looking for this PC). Finding is not linking - you still approve on the device.").Layout(gtx)
 			}
 			rows := make([]layout.FlexChild, 0, len(found))

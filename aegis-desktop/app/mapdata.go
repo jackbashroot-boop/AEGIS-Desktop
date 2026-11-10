@@ -50,6 +50,23 @@ type MapData struct {
 	NoGPS                int // sighting records that had no GPS fix
 	RouteKm              float64
 	CenterLat, CenterLon float64
+
+	// Wi-Fi position estimates (v1.8.7): where GPS had no fix, the
+	// device still logged which known APs it could hear and how
+	// strongly. Those scan groups are positioned from the mapped
+	// APs (RSSI-weighted), honestly labelled estimates - EstUnc[i]
+	// is the ± radius in metres for EstTrack[i]. This is Wi-Fi
+	// positioning from your own atlas, not a cloud lookup.
+	EstTrack [][2]float64
+	EstUnc   []float64
+}
+
+// wifiSighting is one no-GPS AP record kept for Wi-Fi positioning.
+type wifiSighting struct {
+	BSSID string
+	SSID  string
+	RSSI  int
+	TS    float64 // seconds (device uptime in PHOENIX logs)
 }
 
 func validLatLon(lat, lon float64) bool {
@@ -327,6 +344,7 @@ func LoadMapData(root string) MapData {
 	observations := map[string][]MapPoint{}
 	daySet := map[string]bool{}
 	var track [][2]float64
+	var orphanGroups [][]wifiSighting // per-file no-GPS sightings, for Wi-Fi positioning
 
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -336,6 +354,7 @@ func LoadMapData(root string) MapData {
 		var pts []MapPoint
 		var trk [][2]float64
 		var noGPS int
+		var orphans []wifiSighting
 		switch {
 		case strings.HasSuffix(name, ".geojson"):
 			pts = parseGeoJSON(path)
@@ -344,9 +363,12 @@ func LoadMapData(root string) MapData {
 		case strings.HasSuffix(name, ".csv"):
 			pts = parseMapCSV(path)
 		case strings.HasSuffix(name, ".jsonl"):
-			pts, noGPS = parseSightingJSONL(path)
+			pts, noGPS, orphans = parseSightingJSONLFull(path)
 		default:
 			return nil
+		}
+		if len(orphans) > 0 {
+			orphanGroups = append(orphanGroups, orphans)
 		}
 		if len(pts) == 0 && len(trk) == 0 && noGPS == 0 {
 			return nil
@@ -387,8 +409,104 @@ func LoadMapData(root string) MapData {
 		d.Days = append(d.Days, day)
 	}
 	sort.Strings(d.Days)
+
+	// Wi-Fi positioning: place no-GPS scan groups from the APs we
+	// have already mapped with GPS. Estimates only - they never
+	// feed back into AP positions.
+	known := make(map[string]MapPoint, len(d.Points))
+	for _, p := range d.Points {
+		known[strings.ToUpper(p.BSSID)] = p
+	}
+	for _, group := range orphanGroups {
+		est, unc := estimateWiFiPositions(known, group)
+		d.EstTrack = append(d.EstTrack, est...)
+		d.EstUnc = append(d.EstUnc, unc...)
+	}
+
 	d.CenterLat, d.CenterLon = robustCenter(d.Points, d.Track)
 	return d
+}
+
+// estimateWiFiPositions turns groups of no-GPS sightings (same
+// ~20 s scan window, strongest RSSI per BSSID) into device position
+// estimates from already-mapped APs. A group needs at least two
+// known APs; the estimate is the RSSI-range-weighted centroid and
+// the uncertainty is the weighted spread around it, clamped to
+// honest bounds. Groups whose APs disagree wildly are dropped.
+func estimateWiFiPositions(known map[string]MapPoint, orphans []wifiSighting) (track [][2]float64, unc []float64) {
+	if len(known) == 0 || len(orphans) == 0 {
+		return nil, nil
+	}
+	buckets := map[int64]map[string]wifiSighting{}
+	var order []int64
+	for _, o := range orphans {
+		b := int64(o.TS / 20)
+		m := buckets[b]
+		if m == nil {
+			m = map[string]wifiSighting{}
+			buckets[b] = m
+			order = append(order, b)
+		}
+		key := strings.ToUpper(o.BSSID)
+		if prev, ok := m[key]; !ok || o.RSSI > prev.RSSI {
+			m[key] = o
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	for _, b := range order {
+		type apRef struct {
+			p    MapPoint
+			rssi int
+		}
+		var refs []apRef
+		for key, o := range buckets[b] {
+			p, ok := known[key]
+			if !ok || p.UncertaintyM > 400 {
+				continue
+			}
+			refs = append(refs, apRef{p, o.RSSI})
+		}
+		if len(refs) < 2 {
+			continue
+		}
+		var sw, slat, slon float64
+		ws := make([]float64, len(refs))
+		for i, r := range refs {
+			// Crude indoor/outdoor path-loss range from RSSI, then
+			// inverse-square weight, discounted by how well the
+			// AP itself is mapped.
+			rng := math.Pow(10, (-45-float64(r.rssi))/25)
+			effUnc := math.Max(r.p.UncertaintyM, 30)
+			w := 1 / ((rng*rng + 9) * (1 + effUnc/100))
+			ws[i] = w
+			sw += w
+			slat += w * r.p.Lat
+			slon += w * r.p.Lon
+		}
+		if sw == 0 {
+			continue
+		}
+		lat, lon := slat/sw, slon/sw
+		var spread float64
+		for i, r := range refs {
+			dist := haversineKm(lat, lon, r.p.Lat, r.p.Lon) * 1000
+			spread += ws[i] * dist * dist
+		}
+		spread = math.Sqrt(spread / sw)
+		if spread > 1200 {
+			continue // known APs too scattered: no honest estimate
+		}
+		u := spread*0.7 + 20
+		if u < 25 {
+			u = 25
+		}
+		if u > 900 {
+			u = 900
+		}
+		track = append(track, [2]float64{lat, lon})
+		unc = append(unc, u)
+	}
+	return track, unc
 }
 
 // ---- parsers -----------------------------------------------------------
@@ -522,9 +640,16 @@ func parseMapCSV(path string) []MapPoint {
 // records carrying a BSSID (wardrive sightings). Records without a valid
 // fix are counted separately so the UI can say "N sightings had no GPS".
 func parseSightingJSONL(path string) (pts []MapPoint, noGPS int) {
+	pts, noGPS, _ = parseSightingJSONLFull(path)
+	return pts, noGPS
+}
+
+// parseSightingJSONLFull also keeps the no-GPS records (as orphans
+// for Wi-Fi positioning) instead of only counting them.
+func parseSightingJSONLFull(path string) (pts []MapPoint, noGPS int, orphans []wifiSighting) {
 	fh, err := os.Open(path)
 	if err != nil {
-		return nil, 0
+		return nil, 0, nil
 	}
 	defer fh.Close()
 	sc := bufio.NewScanner(fh)
@@ -546,6 +671,12 @@ func parseSightingJSONL(path string) (pts []MapPoint, noGPS int) {
 		lon := propFloat(m, "lon", "lng", "longitude")
 		if !validLatLon(lat, lon) {
 			noGPS++
+			orphans = append(orphans, wifiSighting{
+				BSSID: bssid,
+				SSID:  propStr(m, "ssid", "SSID"),
+				RSSI:  propInt(m, "rssi", "RSSI"),
+				TS:    propFloat(m, "ts", "time", "timestamp"),
+			})
 			continue
 		}
 		pts = append(pts, MapPoint{
@@ -560,7 +691,7 @@ func parseSightingJSONL(path string) (pts []MapPoint, noGPS int) {
 			HDOP:      propFloat(m, "hdop", "HDOP"),
 		})
 	}
-	return pts, noGPS
+	return pts, noGPS, orphans
 }
 
 func propFloat(m map[string]any, keys ...string) float64 {
