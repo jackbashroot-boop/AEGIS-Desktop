@@ -1,0 +1,30 @@
+====================================================================
+  PUSH THIS REPO - CachyOS / fish, one time only
+  Target: https://github.com/jackbashroot-boop/AEGIS-Desktop.git
+====================================================================
+
+1) Tools + login (gh logs YOU in, in your browser - nothing shared):
+   sudo pacman -S --needed git github-cli
+   gh auth login
+     -> GitHub.com -> HTTPS -> Yes (git credentials) -> Login with browser
+
+2) Unzip aegis-repo-upload.zip, then:
+   cd aegis-repo
+   git init -b main
+   git config user.name "jackbashroot-boop"
+   git config user.email "jackbashroot-boop@users.noreply.github.com"
+   git add .
+   git commit -m "AEGIS family suite v1.1.0 - Companion 1.7.0, PHOENIX 0.9.8"
+   git remote add origin https://github.com/jackbashroot-boop/AEGIS-Desktop.git
+   git push -u origin main
+
+3) Check github.com/jackbashroot-boop/AEGIS-Desktop - the tree should
+   be there. After that, tell the assistant "repo is up" and the next
+   step (Releases + wiring the Companion updater to them) gets built.
+
+Notes:
+- This bundle contains NO TALON (red team) and no tokens/passwords.
+- *.zip / *.bin are git-ignored on purpose: binaries ship as Release
+  assets, not in git history.
+- License: none set yet - the repo is Private, so nothing is granted
+  to anyone. Pick one later if you ever mirror it public.
