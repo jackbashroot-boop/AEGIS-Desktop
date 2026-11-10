@@ -35,9 +35,12 @@
 #include <map>
 #include <time.h>
 
-#define AGENT_VERSION "aegis-0.8.3"
-#define FIRMWARE_VER "AEGIS-PHX-v0.12.12-ADV"
-#define FW_VER_NUM "0.12.12"
+#define FIRMWARE_VER "AEGIS-PHX-v0.12.13-ADV"
+#define FW_VER_NUM "0.12.13"
+// Legacy console-link label: DERIVED from the real version (v0.12.13)
+// so it can never fossilise again - it sat at "aegis-0.8.3" for many
+// releases and made successful updates look like they never landed.
+#define AGENT_VERSION "aegis-" FW_VER_NUM
 
 // ---------------------------------------------------------- shared state
 static String g_wifiSsid = "";
