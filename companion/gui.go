@@ -37,6 +37,7 @@ var (
 	colGreen   = color.NRGBA{0x3D, 0xDC, 0x84, 0xFF}
 	colAmber   = color.NRGBA{0xFF, 0xB0, 0x20, 0xFF}
 	colRed     = color.NRGBA{0xFF, 0x52, 0x52, 0xFF}
+	colToastBg = color.NRGBA{0x3A, 0x0D, 0x0D, 0xFF}
 	colViolet  = color.NRGBA{0xB3, 0x88, 0xFF, 0xFF}
 	colSidebar = color.NRGBA{0x0E, 0x13, 0x1D, 0xFF}
 )
@@ -189,9 +190,20 @@ type UI struct {
 	btnCheckUpdate   widget.Clickable
 	btnInstallUpdate widget.Clickable
 	btnUninstall     widget.Clickable
+	btnApplyFeed     widget.Clickable
+	feedEd           widget.Editor
+	ghTokenEd        widget.Editor
 	updateFound      string // human description of a staged update
 	updatePath       string // installer to run ("" = none staged)
-	uninstallArm     bool   // two-click confirm for uninstall
+	updateSeenMsg    string // last async update-check message shown
+	toastText        string // top failure banner (v1.7.2)
+	toastUntil       time.Time
+	seenSettingsMsg  string
+	seenMapMsg       string
+	lastHealthToast  string
+	healthToastAt    time.Time
+	healthToastShown time.Time
+	uninstallArm     bool // two-click confirm for uninstall
 }
 
 // clickSet hands out one stable widget.Clickable per string key.
@@ -235,6 +247,10 @@ func newUI(core *Core) *UI {
 	u.hostEd.SingleLine = true
 	u.sdEd.SingleLine = true
 	u.portEd.SetText(fmt.Sprint(core.Cfg.Port))
+	u.feedEd.SingleLine = true
+	u.ghTokenEd.SingleLine = true
+	u.feedEd.SetText(core.Cfg.UpdateFeed)
+	u.ghTokenEd.SetText(core.Cfg.GitHubToken)
 	u.hostEd.SetText(preferredLANIP())
 	u.homeLatEd.SingleLine = true
 	u.homeLonEd.SingleLine = true
@@ -276,6 +292,9 @@ func runGUI(core *Core) {
 		w := new(app.Window)
 		w.Option(app.Title("AEGIS Companion"), app.Size(1200, 780), app.MinSize(940, 620))
 		u := newUI(core)
+		// One update check per run (v1.7.1): fetches only the tiny
+		// latest.json; nothing downloads without a click.
+		startUpdateCheck(core.Cfg)
 		// Live data changes outside the frame loop; keep the window fresh.
 		go func() {
 			t := time.NewTicker(600 * time.Millisecond)
@@ -546,6 +565,7 @@ func openPath(target string) {
 // ---- shell layout ----
 
 func (u *UI) layout(gtx layout.Context) layout.Dimensions {
+	u.watchToastSources()
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			paint.FillShape(gtx.Ops, colBg, clip.Rect{Max: gtx.Constraints.Min}.Op())
@@ -710,6 +730,7 @@ func (u *UI) content(gtx layout.Context) layout.Dimensions {
 			})
 		}),
 		layout.Rigid(hDivider),
+		layout.Rigid(u.toastBanner),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{Top: 14, Left: 22, Right: 22, Bottom: 16}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				switch u.page {

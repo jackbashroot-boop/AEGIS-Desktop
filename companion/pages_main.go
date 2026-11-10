@@ -455,15 +455,17 @@ func (u *UI) pageLive(gtx layout.Context) layout.Dimensions {
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return material.List(u.th, &u.liveList).Layout(gtx, len(devs), func(gtx layout.Context, i int) layout.Dimensions {
-				d := devs[i]
-				click := u.liveRows.get(d.Prog)
-				if click.Clicked(gtx) {
-					u.selProg = d.Prog
-				}
-				return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return material.Clickable(gtx, click, func(gtx layout.Context) layout.Dimensions {
-						return u.liveCard(gtx, d, false)
+			return withScrollBar(gtx, &u.liveList, func(gtx layout.Context) layout.Dimensions {
+				return material.List(u.th, &u.liveList).Layout(gtx, len(devs), func(gtx layout.Context, i int) layout.Dimensions {
+					d := devs[i]
+					click := u.liveRows.get(d.Prog)
+					if click.Clicked(gtx) {
+						u.selProg = d.Prog
+					}
+					return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return material.Clickable(gtx, click, func(gtx layout.Context) layout.Dimensions {
+							return u.liveCard(gtx, d, false)
+						})
 					})
 				})
 			})

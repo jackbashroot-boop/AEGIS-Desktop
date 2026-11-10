@@ -235,17 +235,19 @@ func (u *UI) libraryFiles(gtx layout.Context, dp *DayProg) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
 		layout.Rigid(hDivider),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return material.List(u.th, &u.libList).Layout(gtx, len(dp.Files), func(gtx layout.Context, i int) layout.Dimensions {
-				f := dp.Files[i]
-				return layout.Inset{Top: 5, Bottom: 5}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							return u.label(12.5, colText, f.Name).Layout(gtx)
-						}),
-						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return u.label(12, colDim, humanBytes(f.Size)).Layout(gtx)
-						}),
-					)
+			return withScrollBar(gtx, &u.libList, func(gtx layout.Context) layout.Dimensions {
+				return material.List(u.th, &u.libList).Layout(gtx, len(dp.Files), func(gtx layout.Context, i int) layout.Dimensions {
+					f := dp.Files[i]
+					return layout.Inset{Top: 5, Bottom: 5}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+							layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+								return u.label(12.5, colText, f.Name).Layout(gtx)
+							}),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.label(12, colDim, humanBytes(f.Size)).Layout(gtx)
+							}),
+						)
+					})
 				})
 			})
 		}),
@@ -286,54 +288,56 @@ func (u *UI) pageReports(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			gtx.Constraints.Min.X = gtx.Dp(330)
 			gtx.Constraints.Max.X = gtx.Dp(330)
-			return material.List(u.th, &u.repList).Layout(gtx, len(sums), func(gtx layout.Context, i int) layout.Dimensions {
-				dp := sums[i]
-				key := dp.Day + "\x00" + dp.Prog
-				click := u.repRows.get(key)
-				if click.Clicked(gtx) {
-					u.selReport = key
-				}
-				return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return material.Clickable(gtx, click, func(gtx layout.Context) layout.Dimensions {
-						bg := colPanel
-						if key == u.selReport {
-							bg = colPanel2
-						}
-						return bgFill(gtx, bg, 10, pad(10, func(gtx layout.Context) layout.Dimensions {
-							return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return u.artBadge(gtx, dp.Prog, 1.3)
-										}),
-										layout.Rigid(hSpace(8)),
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return chip(gtx, u, dp.Prog, accentNRGBA(dp.Prog))
-										}),
-										layout.Rigid(hSpace(8)),
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return u.label(11.5, colDim, dp.Day).Layout(gtx)
-										}),
-										layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-											return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, 0)}
-										}),
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											if dp.Bad > 0 {
-												return u.label(11, colRed, fmt.Sprintf("⚠ %d chain bad", dp.Bad)).Layout(gtx)
-											}
-											return u.label(11, colGreen, "chain ok").Layout(gtx)
-										}),
-									)
-								}),
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return u.label(12.5, colText, dp.Headline).Layout(gtx)
-								}),
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return u.label(11, colFaint, fmt.Sprintf("%d item(s)", len(dp.Findings))).Layout(gtx)
-								}),
-							)
-						}))
+			return withScrollBar(gtx, &u.repList, func(gtx layout.Context) layout.Dimensions {
+				return material.List(u.th, &u.repList).Layout(gtx, len(sums), func(gtx layout.Context, i int) layout.Dimensions {
+					dp := sums[i]
+					key := dp.Day + "\x00" + dp.Prog
+					click := u.repRows.get(key)
+					if click.Clicked(gtx) {
+						u.selReport = key
+					}
+					return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return material.Clickable(gtx, click, func(gtx layout.Context) layout.Dimensions {
+							bg := colPanel
+							if key == u.selReport {
+								bg = colPanel2
+							}
+							return bgFill(gtx, bg, 10, pad(10, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												return u.artBadge(gtx, dp.Prog, 1.3)
+											}),
+											layout.Rigid(hSpace(8)),
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												return chip(gtx, u, dp.Prog, accentNRGBA(dp.Prog))
+											}),
+											layout.Rigid(hSpace(8)),
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												return u.label(11.5, colDim, dp.Day).Layout(gtx)
+											}),
+											layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+												return layout.Dimensions{Size: image.Pt(gtx.Constraints.Max.X, 0)}
+											}),
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												if dp.Bad > 0 {
+													return u.label(11, colRed, fmt.Sprintf("⚠ %d chain bad", dp.Bad)).Layout(gtx)
+												}
+												return u.label(11, colGreen, "chain ok").Layout(gtx)
+											}),
+										)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return u.label(12.5, colText, dp.Headline).Layout(gtx)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return u.label(11, colFaint, fmt.Sprintf("%d item(s)", len(dp.Findings))).Layout(gtx)
+									}),
+								)
+							}))
+						})
 					})
 				})
 			})
@@ -366,55 +370,57 @@ func (u *UI) reportDetail(gtx layout.Context, dp *DayProg) layout.Dimensions {
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 8) }),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return material.List(u.th, &u.findList).Layout(gtx, len(dp.Findings), func(gtx layout.Context, i int) layout.Dimensions {
-				f := dp.Findings[i]
-				key := fmt.Sprintf("%s|%s|%d", dp.Day, dp.Prog, i)
-				toggle := u.repExpand.get(key)
-				if toggle.Clicked(gtx) {
-					u.expanded[key] = !u.expanded[key]
-				}
-				sevCol := sevColorN(f.Sev)
-				return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return bgFill(gtx, colPanel, 10, pad(10, func(gtx layout.Context) layout.Dimensions {
-						children := []layout.FlexChild{
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										return u.label(11, sevCol, "●").Layout(gtx)
-									}),
-									layout.Rigid(hSpace(6)),
-									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-										return u.bold(13, colText, f.Simple).Layout(gtx)
-									}),
-								)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(12, colDim, f.Why).Layout(gtx)
-							}),
-						}
-						if f.Detail != "" {
+			return withScrollBar(gtx, &u.findList, func(gtx layout.Context) layout.Dimensions {
+				return material.List(u.th, &u.findList).Layout(gtx, len(dp.Findings), func(gtx layout.Context, i int) layout.Dimensions {
+					f := dp.Findings[i]
+					key := fmt.Sprintf("%s|%s|%d", dp.Day, dp.Prog, i)
+					toggle := u.repExpand.get(key)
+					if toggle.Clicked(gtx) {
+						u.expanded[key] = !u.expanded[key]
+					}
+					sevCol := sevColorN(f.Sev)
+					return layout.Inset{Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return bgFill(gtx, colPanel, 10, pad(10, func(gtx layout.Context) layout.Dimensions {
+							children := []layout.FlexChild{
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											return u.label(11, sevCol, "●").Layout(gtx)
+										}),
+										layout.Rigid(hSpace(6)),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											return u.bold(13, colText, f.Simple).Layout(gtx)
+										}),
+									)
+								}),
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return u.label(12, colDim, f.Why).Layout(gtx)
+								}),
+							}
+							if f.Detail != "" {
+								children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return u.label(12, colCyan, f.Detail).Layout(gtx)
+								}))
+							}
 							children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(12, colCyan, f.Detail).Layout(gtx)
-							}))
-						}
-						children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							return material.Clickable(gtx, toggle, func(gtx layout.Context) layout.Dimensions {
-								arrow := "▸"
-								if u.expanded[key] {
-									arrow = "▾"
-								}
-								return u.label(11.5, colFaint, arrow+" technical details (file: "+f.Source+", kind: "+f.Kind+")").Layout(gtx)
-							})
-						}))
-						if u.expanded[key] {
-							children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return layout.Inset{Top: 4}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-									return u.label(10.5, colDim, f.Raw).Layout(gtx)
+								return material.Clickable(gtx, toggle, func(gtx layout.Context) layout.Dimensions {
+									arrow := "▸"
+									if u.expanded[key] {
+										arrow = "▾"
+									}
+									return u.label(11.5, colFaint, arrow+" technical details (file: "+f.Source+", kind: "+f.Kind+")").Layout(gtx)
 								})
 							}))
-						}
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
-					}))
+							if u.expanded[key] {
+								children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return layout.Inset{Top: 4}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+										return u.label(10.5, colDim, f.Raw).Layout(gtx)
+									})
+								}))
+							}
+							return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+						}))
+					})
 				})
 			})
 		}),
@@ -455,17 +461,19 @@ func (u *UI) pageLog(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 8) }),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return bgFill(gtx, colPanel, 10, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return material.List(u.th, &u.logList).Layout(gtx, len(lines), func(gtx layout.Context, i int) layout.Dimensions {
-					ln := lines[i]
-					c := colDim
-					if strings.Contains(ln, " ERROR ") {
-						c = colRed
-					} else if strings.Contains(ln, " WARN ") {
-						c = colAmber
-					} else if strings.Contains(ln, "live:") || strings.Contains(ln, "received ") {
-						c = colText
-					}
-					return u.label(11.5, c, ln).Layout(gtx)
+				return withScrollBar(gtx, &u.logList, func(gtx layout.Context) layout.Dimensions {
+					return material.List(u.th, &u.logList).Layout(gtx, len(lines), func(gtx layout.Context, i int) layout.Dimensions {
+						ln := lines[i]
+						c := colDim
+						if strings.Contains(ln, " ERROR ") {
+							c = colRed
+						} else if strings.Contains(ln, " WARN ") {
+							c = colAmber
+						} else if strings.Contains(ln, "live:") || strings.Contains(ln, "received ") {
+							c = colText
+						}
+						return u.label(11.5, c, ln).Layout(gtx)
+					})
 				})
 			}))
 		}),
@@ -476,6 +484,15 @@ func (u *UI) pageLog(gtx layout.Context) layout.Dimensions {
 
 func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 	cfg := u.core.Cfg
+
+	// Async update check/download (v1.7.1) reports through here.
+	if st := updateSnapshot(); st.msg != "" && st.msg != u.updateSeenMsg {
+		u.updateSeenMsg = st.msg
+		u.settingsMsg = st.msg
+		if st.stagedPath != "" {
+			u.updatePath = st.stagedPath
+		}
+	}
 
 	if u.btnApplyPort.Clicked(gtx) {
 		p, err := strconv.Atoi(strings.TrimSpace(u.portEd.Text()))
@@ -538,38 +555,43 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		}
 	}
 	if u.btnCheckUpdate.Clicked(gtx) {
-		latest, path, err := findUpdate()
-		switch {
-		case err != nil:
-			u.updateFound, u.updatePath = "", ""
-			u.settingsMsg = "No update staged. Updates live in the Updates folder next to the program (" + updatesDir() + "): a newer suite installer plus a small latest.json. When the family repo exists, that folder is what it will feed - nothing is downloaded silently."
-			u.core.Log.Infof("update check: nothing staged (%v)", err)
-		case !versionNewer(latest.Version, appVersion):
-			u.updateFound, u.updatePath = "", ""
-			u.settingsMsg = fmt.Sprintf("You are up to date - this is v%s, the staged update is v%s.", appVersion, latest.Version)
-		default:
-			u.updatePath = path
-			u.updateFound = fmt.Sprintf("Update v%s is staged and ready", latest.Version)
-			msg := u.updateFound + ". Use 'Install update' and the suite installer will upgrade everything in place - your Library is kept."
-			if latest.Notes != "" {
-				msg += " Notes: " + latest.Notes
-			}
-			if path == "" {
-				msg += " (latest.json names no installer file, so there is nothing to run yet.)"
-				u.updatePath = ""
-			}
-			u.settingsMsg = msg
-			u.core.Log.Infof("update check: v%s staged at %s", latest.Version, path)
-		}
+		u.updatePath = ""
+		startUpdateCheck(cfg)
+		u.core.Log.Infof("update check started (local Updates folder + feed %s)", cfg.UpdateFeed)
 	}
 	if u.btnInstallUpdate.Clicked(gtx) {
+		st := updateSnapshot()
 		if u.updatePath == "" {
+			u.updatePath = st.stagedPath
+		}
+		switch {
+		case u.updatePath != "":
+			if err := launchInstaller(u.updatePath); err != nil {
+				u.settingsMsg = "Could not start the update installer: " + err.Error()
+			} else {
+				u.core.Log.Infof("update installer launched: %s - closing so it can replace files", u.updatePath)
+				os.Exit(0) // the installer upgrades in place; get out of its way
+			}
+		case st.haveRemote:
+			startUpdateDownload(cfg)
+			u.core.Log.Infof("update download started for v%s", st.latest.Version)
+		default:
 			u.settingsMsg = "Check for updates first - no staged installer to run."
-		} else if err := launchInstaller(u.updatePath); err != nil {
-			u.settingsMsg = "Could not start the update installer: " + err.Error()
+		}
+	}
+	if u.btnApplyFeed.Clicked(gtx) {
+		feed := strings.TrimSpace(u.feedEd.Text())
+		if feed != "" && !strings.HasPrefix(feed, "https://") {
+			u.settingsMsg = "The update feed must be an https:// URL."
 		} else {
-			u.core.Log.Infof("update installer launched: %s - closing so it can replace files", u.updatePath)
-			os.Exit(0) // the installer upgrades in place; get out of its way
+			cfg.UpdateFeed = feed
+			cfg.GitHubToken = strings.TrimSpace(u.ghTokenEd.Text())
+			if err := cfg.Save(); err != nil {
+				u.settingsMsg = "Could not save: " + err.Error()
+			} else {
+				u.settingsMsg = "Update feed saved. 'Check for updates' now looks at: " + cfg.UpdateFeed
+				u.core.Log.Infof("update feed set to %s (token %s)", cfg.UpdateFeed, map[bool]string{true: "set", false: "not set"}[cfg.GitHubToken != ""])
+			}
 		}
 	}
 	if u.btnUninstall.Clicked(gtx) {
@@ -809,7 +831,33 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				}),
 			)
 		}),
-		caption(u, "Updates are checked in the Updates folder beside the program - a newer suite installer + latest.json (this is where the future repo will plug in; nothing downloads silently). Uninstall uses the suite uninstaller: the program and shortcut go, your Library is moved to Aegis-Library-Backup, never deleted."),
+		caption(u, "Check for updates looks in the Updates folder beside the program AND at the AEGIS-Desktop repo release feed below. The check itself only fetches a tiny latest.json - the installer downloads only when you click Install update, is SHA-256-verified, and your Library is always kept. Uninstall uses the suite uninstaller: the program and shortcut go, your Library is moved to Aegis-Library-Backup, never deleted."),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(12, colDim, "Update feed:").Layout(gtx)
+				}),
+				layout.Rigid(hSpace(8)),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return u.field(&u.feedEd, "https://github.com/.../latest.json")(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(12, colDim, "GitHub token (only if the repo is private):").Layout(gtx)
+				}),
+				layout.Rigid(hSpace(8)),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return u.field(&u.ghTokenEd, "optional - stored only in the local config")(gtx)
+				}),
+				layout.Rigid(hSpace(10)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.btnGhost(&u.btnApplyFeed, "Save feed").Layout(gtx)
+				}),
+			)
+		}),
 		sectionTitle(u, "The family - who connects to this hub, and how"),
 		caption(u, "Each program has its own job and its own artwork. Linked ones find this PC themselves; TALON and KEEPER never link, by design."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1130,8 +1178,10 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return material.List(u.th, &u.setList).Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
-				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, form...)
+			return withScrollBar(gtx, &u.setList, func(gtx layout.Context) layout.Dimensions {
+				return material.List(u.th, &u.setList).Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx, form...)
+				})
 			})
 		}),
 	)

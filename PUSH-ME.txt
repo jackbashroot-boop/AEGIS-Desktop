@@ -1,30 +1,37 @@
 ====================================================================
-  PUSH THIS REPO - CachyOS / fish, one time only
+  UPDATE THE REPO + PUBLISH THE RELEASE - CachyOS / fish
   Target: https://github.com/jackbashroot-boop/AEGIS-Desktop.git
 ====================================================================
 
-1) Tools + login (gh logs YOU in, in your browser - nothing shared):
-   sudo pacman -S --needed git github-cli
-   gh auth login
-     -> GitHub.com -> HTTPS -> Yes (git credentials) -> Login with browser
+Your zips land in:  ~/Downloads/Red and Blue/Zip Files
+Run everything from there with the $DL shortcut below.
 
-2) Unzip aegis-repo-upload.zip, then:
-   cd aegis-repo
-   git init -b main
+set DL $HOME/Downloads/"Red and Blue"/"Zip Files"
+
+1) Refresh sources + push (clones the repo first if needed):
+   test -d $HOME/aegis-repo/.git; or git clone https://github.com/jackbashroot-boop/AEGIS-Desktop.git $HOME/aegis-repo
+   unzip -o "$DL/aegis-repo-upload.zip" -d /tmp/aegis-new
+   cp -r /tmp/aegis-new/aegis-repo/. $HOME/aegis-repo/
+   cd $HOME/aegis-repo
    git config user.name "jackbashroot-boop"
    git config user.email "jackbashroot-boop@users.noreply.github.com"
-   git add .
-   git commit -m "AEGIS family suite v1.1.0 - Companion 1.7.0, PHOENIX 0.9.8"
-   git remote add origin https://github.com/jackbashroot-boop/AEGIS-Desktop.git
-   git push -u origin main
+   git add -A
+   git commit -m "Suite v1.2.1 - Companion 1.7.2 scroll bars + failure banner (1.7.1 repo updater, PHOENIX 0.9.9, BENCH/LANTERN 0.1.3, HERALD 0.1.5)"
+   git push
 
-3) Check github.com/jackbashroot-boop/AEGIS-Desktop - the tree should
-   be there. After that, tell the assistant "repo is up" and the next
-   step (Releases + wiring the Companion updater to them) gets built.
+   (The git config lines fix "Author identity unknown". They are
+   LOCAL to this repo - never share any password/token instead.)
 
-Notes:
-- This bundle contains NO TALON (red team) and no tokens/passwords.
-- *.zip / *.bin are git-ignored on purpose: binaries ship as Release
-  assets, not in git history.
-- License: none set yet - the repo is Private, so nothing is granted
-  to anyone. Pick one later if you ever mirror it public.
+2) Publish the release the Companion updater reads:
+   unzip -o "$DL/Aegis-Release-v1.2.1-Assets.zip" -d "$DL/release-v1.2.1"
+   gh release create v1.2.1 "$DL"/release-v1.2.1/* --title "AEGIS Suite v1.2.1" --notes "Scroll bars + failure banner; repo updater; PHOENIX auto-join."
+   gh release upload v1.2.1 "$DL/AEGIS-KEEP-ARCHIVE-v1.2.1.zip"   # optional restore-everything archive
+
+3) Visibility: Companion checks releases/latest/download/latest.json
+   anonymously. PRIVATE repo = 404 = no updates. Either make the
+   repo public, or paste a read-only GitHub token into Companion >
+   Settings > Updates & removal (stored only in your local config).
+
+4) Verify: reboot Companion - Dashboard health should show
+   "Updates ... checked against the repo", and Settings > Check
+   for updates should say you are up to date on v1.7.2.

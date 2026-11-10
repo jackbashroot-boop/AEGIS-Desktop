@@ -233,54 +233,56 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 		}),
 		sectionTitle(u, fmt.Sprintf("Networks by strongest signal (%d) - click one to open it in Google Maps", len(d.Points))),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-			return material.List(u.th, &u.mapList).Layout(gtx, len(d.Points), func(gtx layout.Context, i int) layout.Dimensions {
-				p := d.Points[i]
-				click := u.mapRows.get(p.BSSID)
-				if click.Clicked(gtx) {
-					openPath(GoogleMapsURL(p.Lat, p.Lon))
-				}
-				return layout.Inset{Bottom: 6}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					return material.Clickable(gtx, click, func(gtx layout.Context) layout.Dimensions {
-						return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									sz := gtx.Dp(10)
-									paint.FillShape(gtx.Ops, rssiNRGBA(p.RSSI),
-										clip.Ellipse{Min: image.Pt(0, 0), Max: image.Pt(sz, sz)}.Op(gtx.Ops))
-									return layout.Dimensions{Size: image.Pt(sz, sz)}
-								}),
-								layout.Rigid(hSpace(10)),
-								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-									ssid := p.SSID
-									if ssid == "" {
-										ssid = "(hidden network)"
-									}
-									return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return u.bold(13, colText, ssid).Layout(gtx)
-										}),
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return u.label(11, colDim, fmt.Sprintf("%s \u00b7 ch %d \u00b7 seen %dx \u00b7 %s",
-												p.BSSID, p.Channel, p.Sightings, p.Day)).Layout(gtx)
-										}),
-									)
-								}),
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return u.bold(12.5, rssiNRGBA(p.RSSI), fmt.Sprintf("%d dBm", p.RSSI)).Layout(gtx)
-										}),
-										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-											return u.label(11, colDim, fmt.Sprintf("%.5f, %.5f", p.Lat, p.Lon)).Layout(gtx)
-										}),
-									)
-								}),
-								layout.Rigid(hSpace(10)),
-								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-									return u.label(11.5, colCyan, "Google Maps \u2197").Layout(gtx)
-								}),
-							)
-						}))
+			return withScrollBar(gtx, &u.mapList, func(gtx layout.Context) layout.Dimensions {
+				return material.List(u.th, &u.mapList).Layout(gtx, len(d.Points), func(gtx layout.Context, i int) layout.Dimensions {
+					p := d.Points[i]
+					click := u.mapRows.get(p.BSSID)
+					if click.Clicked(gtx) {
+						openPath(GoogleMapsURL(p.Lat, p.Lon))
+					}
+					return layout.Inset{Bottom: 6}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+						return material.Clickable(gtx, click, func(gtx layout.Context) layout.Dimensions {
+							return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
+								return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										sz := gtx.Dp(10)
+										paint.FillShape(gtx.Ops, rssiNRGBA(p.RSSI),
+											clip.Ellipse{Min: image.Pt(0, 0), Max: image.Pt(sz, sz)}.Op(gtx.Ops))
+										return layout.Dimensions{Size: image.Pt(sz, sz)}
+									}),
+									layout.Rigid(hSpace(10)),
+									layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+										ssid := p.SSID
+										if ssid == "" {
+											ssid = "(hidden network)"
+										}
+										return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												return u.bold(13, colText, ssid).Layout(gtx)
+											}),
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												return u.label(11, colDim, fmt.Sprintf("%s \u00b7 ch %d \u00b7 seen %dx \u00b7 %s",
+													p.BSSID, p.Channel, p.Sightings, p.Day)).Layout(gtx)
+											}),
+										)
+									}),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												return u.bold(12.5, rssiNRGBA(p.RSSI), fmt.Sprintf("%d dBm", p.RSSI)).Layout(gtx)
+											}),
+											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+												return u.label(11, colDim, fmt.Sprintf("%.5f, %.5f", p.Lat, p.Lon)).Layout(gtx)
+											}),
+										)
+									}),
+									layout.Rigid(hSpace(10)),
+									layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										return u.label(11.5, colCyan, "Google Maps \u2197").Layout(gtx)
+									}),
+								)
+							}))
+						})
 					})
 				})
 			})

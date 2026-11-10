@@ -1,6 +1,6 @@
 ====================================================================
   AEGIS FAMILY SUITE - what's inside, and what goes where
-  Suite v1.1.0 - bundles Companion v1.7.0
+  Suite v1.2.1 - bundles Companion v1.7.2
 ====================================================================
 
 THE PC PROGRAM
@@ -13,18 +13,18 @@ THE PC PROGRAM
   and writes plain-English reports.
 
 THE DEVICE PROGRAMS (Suite/ folder - one package per program)
-  PHOENIX v0.9.8  - Cardputer ADV. Blue-team Sentinel: wardriving,
+  PHOENIX v0.9.9  - Cardputer ADV. Blue-team Sentinel: wardriving,
                     passive scans, get-home sync. The collector.
   SCRIBE  v0.1.7  - Cardputer ADV. Field notebook; hash-chained,
                     tamper-evident notes; syncs at home.
   HEARTH  v0.1.6  - Cardputer ADV. Home sentinel; watches your own
                     network, syncs at home.
-  HERALD  v0.1.4  - CYD (ESP32-2432S028) desk display. Shows what
-                    the family is doing. v0.1.4 note: flash its
+  HERALD  v0.1.5  - CYD (ESP32-2432S028) desk display. Shows what
+                    the family is doing. v0.1.5 note: flash its
                     partitions.bin AND the app (see its README).
   KEEPER  v0.1.3  - Cardputer ADV. Radio-off vault display.
-  BENCH   v0.1.2  - Cardputer ADV. Wired bench tool (UART/I2C).
-  LANTERN v0.1.2  - Cardputer ADV. LoRa/GNSS companion (Mesh kit).
+  BENCH   v0.1.3  - Cardputer ADV. Wired bench tool (UART/I2C).
+  LANTERN v0.1.3  - Cardputer ADV. LoRa/GNSS companion (Mesh kit).
 
   Each package unzips to an SD-card folder; each has its own
   README_SD.txt with flash steps. Copy to SD, flash from card or

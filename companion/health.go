@@ -72,6 +72,7 @@ func (c *Core) Health() []HealthItem {
 	} else {
 		items = append(items, HealthItem{"Listener", "DOWN - devices cannot connect; check Settings", false, false})
 	}
+	items = append(items, updateHealthLine())
 	if port, ok := c.Disco.Running(); ok {
 		seek := ""
 		if s := c.Disco.Seekers(); len(s) > 0 {

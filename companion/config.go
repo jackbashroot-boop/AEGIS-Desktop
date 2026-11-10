@@ -15,17 +15,24 @@ import (
 // Config mirrors the old Python companion.json so existing SD cards and
 // habits carry over unchanged: same port, same desktop.txt format.
 type Config struct {
-	Port    int     `json:"port"`
-	Token   string  `json:"token"`
-	Library string  `json:"library"`
-	HomeLat float64 `json:"home_lat"` // centre of the saved offline map area
-	HomeLon float64 `json:"home_lon"`
+	Port    int    `json:"port"`
+	Token   string `json:"token"`
+	Library string `json:"library"`
+	// UpdateFeed is the URL of the release latest.json the updater
+	// checks (v1.7.1: the AEGIS-Desktop GitHub repo by default).
+	UpdateFeed string `json:"update_feed"`
+	// GitHubToken optionally authenticates feed/download requests
+	// when the repo is private. Entered locally in Settings; never
+	// leaves this machine except to api.github.com/github.com.
+	GitHubToken string  `json:"github_token,omitempty"`
+	HomeLat     float64 `json:"home_lat"` // centre of the saved offline map area
+	HomeLon     float64 `json:"home_lon"`
 }
 
 const (
 	defaultPort    = 8791
 	configFileName = "aegis-companion.json"
-	appVersion     = "1.7.0"
+	appVersion     = "1.7.2"
 )
 
 // exeDir is the folder the program lives in. Config, Library and logs sit
@@ -65,13 +72,17 @@ func loadOrCreateConfig() (*Config, error) {
 			if cfg.Library == "" {
 				cfg.Library = filepath.Join(exeDir(), "Library")
 			}
+			if cfg.UpdateFeed == "" {
+				cfg.UpdateFeed = defaultUpdateFeed
+			}
 			return &cfg, nil
 		}
 	}
 	cfg := &Config{
-		Port:    defaultPort,
-		Token:   newToken(),
-		Library: filepath.Join(exeDir(), "Library"),
+		Port:       defaultPort,
+		Token:      newToken(),
+		Library:    filepath.Join(exeDir(), "Library"),
+		UpdateFeed: defaultUpdateFeed,
 	}
 	if err := cfg.Save(); err != nil {
 		return nil, err

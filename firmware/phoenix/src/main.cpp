@@ -35,11 +35,19 @@
 #include <time.h>
 
 #define AGENT_VERSION "aegis-0.8.3"
-#define FIRMWARE_VER "AEGIS-PHX-v0.9.8-ADV"
+#define FIRMWARE_VER "AEGIS-PHX-v0.9.9-ADV"
 
 // ---------------------------------------------------------- shared state
 static String g_wifiSsid = "";
 static String g_wifiPsk = "";
+// Saved-network auto-join guard (v0.9.9): while a join attempt is in
+// flight, background Wi-Fi scans must not steal the radio - they were
+// resetting association attempts every ~20 s so a saved network could
+// sit "in range" forever without ever connecting.
+static bool g_wifiJoinGuard = false;
+static uint32_t g_wifiJoinGuardUntilMs = 0;
+static bool g_autoJoinActive = false;
+static uint32_t g_autoJoinStartMs = 0, g_autoJoinNextMs = 0;
 static String g_consoleUrl = "";      // empty = autonomous offline mode
 static String g_enrollToken = "";
 static String g_hmacSecret = "";
@@ -179,6 +187,7 @@ static void saveHomeProfile(const String& ssid, const String& psk) {
 static void startHomeJoinAttempt(const String& ssid, const String& psk) {
   g_homeCandidateSsid = ssid; g_homeCandidatePsk = psk;
   g_homeJoinActive = true; g_homeJoinStartMs = millis();
+  g_wifiJoinGuard = true; g_wifiJoinGuardUntilMs = millis() + 20000;
   g_homeJoinStatus = "JOINING " + ssid;
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false);
@@ -1100,7 +1109,7 @@ static void liveTaskFn(void*) {
     String nonce;
     if (ok) { const int np = ln.indexOf("\"nonce\":\""); nonce = np >= 0 ? ln.substring(np + 9, ln.indexOf("\"", np + 9)) : ""; }
     if (ok) {
-      c.print("{\"auth\":\"" + liveHmacHex(g_deskToken, nonce) + "\",\"prog\":\"PHOENIX\",\"ver\":\"0.9.8\"}\n");
+      c.print("{\"auth\":\"" + liveHmacHex(g_deskToken, nonce) + "\",\"prog\":\"PHOENIX\",\"ver\":\"0.9.9\"}\n");
       ok = liveReadLine(c, ln) && (ln.indexOf("\"ok\": true") >= 0 || ln.indexOf("\"ok\":true") >= 0);
     }
     if (ok) {
@@ -1233,7 +1242,7 @@ static bool runPhxSync() {
   String nonce;
   if (ok) { const int np = ln.indexOf("\"nonce\":\""); nonce = np >= 0 ? ln.substring(np + 9, ln.indexOf("\"", np + 9)) : ""; }
   if (ok) {
-    c.print("{\"auth\":\"" + liveHmacHex(g_deskToken, nonce) + "\",\"prog\":\"PHOENIX\",\"ver\":\"0.9.8\"}\n");
+    c.print("{\"auth\":\"" + liveHmacHex(g_deskToken, nonce) + "\",\"prog\":\"PHOENIX\",\"ver\":\"0.9.9\"}\n");
     ok = liveReadLine(c, ln) && (ln.indexOf("\"ok\": true") >= 0 || ln.indexOf("\"ok\":true") >= 0);
   }
   int storedCount = 0;
@@ -1314,7 +1323,7 @@ static void handleSerialLine(String line) {
   if (line == "AEGIS HELP") {
     Serial.println("+AEGIS: AEGIS HELP | STATUS | EVENTS | RULES | EXPORT MAP | PCAP ON/OFF | CHAN | RFID ON/OFF");
   } else if (line == "AEGIS STATUS") {
-    Serial.printf("+AEGIS: {\"fw\":\"AEGIS-PHX-v0.9.8-ADV\",\"uptime_s\":%u,\"events\":%u,"
+    Serial.printf("+AEGIS: {\"fw\":\"AEGIS-PHX-v0.9.9-ADV\",\"uptime_s\":%u,\"events\":%u,"
                   "\"rules\":%u,\"rules_off\":%u,\"atlas\":%u,\"gnss_fix\":%d,\"track\":%u,\"view\":%d}\n",
                   (unsigned)(millis() / 1000), (unsigned)g_eventHistory.size(),
                   (unsigned)localRules.size(), (unsigned)localRules.disabled.size(),
@@ -1372,7 +1381,7 @@ static void serviceSerial() {
 }
 
 static void failHomeJoin(const String& shortWhy, const String& prompt, bool ssidProblem) {
-  g_homeJoinActive = false;
+  g_homeJoinActive = false; g_wifiJoinGuard = false;
   g_homeJoinStatus = "FAIL: " + shortWhy;
   WiFi.disconnect(false);
   g_view = VIEW_MODULES;
@@ -1413,17 +1422,39 @@ static void wifiJoinTick() {
   }
 }
 static void homeNetTick() {
-  static uint32_t nextTry = 0, backoffMs = 5000;
   if (g_homeJoinActive || g_shadowTyping == 4 || g_shadowTyping == 5) return;   // setup owns the radio
-  if (g_passiveOffline || quarantined || !g_wifiSsid.length()) return;
-  if (WiFi.status() == WL_CONNECTED) { backoffMs = 5000; return; }
+  if (g_passiveOffline || quarantined || !g_wifiSsid.length()) { g_autoJoinActive = false; g_wifiJoinGuard = false; return; }
+  if (WiFi.status() == WL_CONNECTED) {
+    g_autoJoinActive = false; g_wifiJoinGuard = false; g_autoJoinNextMs = 0;
+    g_homeJoinStatus = "CONNECTED " + WiFi.SSID() + " " + WiFi.localIP().toString();
+    return;
+  }
   const bool busy = g_wifiScanRunning || g_bleScanRunning || g_lanScan.active || g_wardriveOn;
-  if (busy) return;                       // scans preempt the join
-  if ((int32_t)(millis() - nextTry) < 0) return;
+  if (busy) return;                       // a scan already running finishes first
+  const uint32_t now = millis();
+  if (g_autoJoinActive) {
+    g_wifiJoinGuard = true; g_wifiJoinGuardUntilMs = g_autoJoinStartMs + 20000;
+    if (now - g_autoJoinStartMs < 20000) {
+      g_homeJoinStatus = "AUTO-JOINING " + g_wifiSsid + " (" + String((now - g_autoJoinStartMs) / 1000) + "s)";
+      return;
+    }
+    // One full 20 s attempt failed. Say why, then keep retrying every
+    // 30 s - a saved network coming into range joins on its own.
+    const wl_status_t st = WiFi.status();
+    g_autoJoinActive = false; g_wifiJoinGuard = false; g_autoJoinNextMs = now + 30000;
+    g_homeJoinStatus = st == WL_NO_SSID_AVAIL ? "AUTO: " + g_wifiSsid + " not in range - will keep trying"
+                     : st == WL_CONNECT_FAILED ? "AUTO FAIL: saved password rejected - re-enter it in SETUP"
+                     : "AUTO: join timed out - will keep trying";
+    Serial.printf("[WIFI] auto-join attempt ended, status=%d - retry in 30 s\n", (int)st);
+    return;
+  }
+  if ((int32_t)(now - g_autoJoinNextMs) < 0) return;
   WiFi.mode(WIFI_STA);
   WiFi.begin(g_wifiSsid.c_str(), g_wifiPsk.c_str());
-  nextTry = millis() + backoffMs;
-  backoffMs = min<uint32_t>(backoffMs * 2 + 5000, 60000);
+  g_autoJoinActive = true; g_autoJoinStartMs = now;
+  g_wifiJoinGuard = true; g_wifiJoinGuardUntilMs = now + 20000;
+  g_homeJoinStatus = "AUTO-JOINING " + g_wifiSsid;
+  Serial.printf("[WIFI] auto-joining saved network %s\n", g_wifiSsid.c_str());
 }
 
 void loop() {

@@ -715,6 +715,10 @@ static void serviceBackgroundScans() {
   if (!g_scanPending && !g_scanManualPending) return;
   if (M5Cardputer.Keyboard.isPressed() || now - g_lastKeyActivityMs <= 1500) return;
 
+  if (g_wifiJoinGuard && (int32_t)(g_wifiJoinGuardUntilMs - now) > 0) {
+    g_scanStatus = "WiFi joining - scans paused";   // v0.9.9: never steal the radio mid-join
+    return;
+  }
   bootStageNow("sc-kick");
   g_scanPending = false;
   g_scanManualPending = false;
