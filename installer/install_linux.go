@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
 )
 
 func companionBinaryName() string { return "AegisCompanion" }
@@ -98,3 +101,32 @@ func libraryBackupDir() (string, error) {
 }
 
 func uninstallTip() string { return "" }
+
+// killRunningCompanion terminates any AegisCompanion process whose
+// executable lives in the install dir (graceful TERM, removal
+// retries in uninstall() handle stragglers).
+func killRunningCompanion(dir string) {
+	target := filepath.Join(dir, companionBinaryName())
+	ents, err := os.ReadDir("/proc")
+	if err != nil {
+		return
+	}
+	killed := false
+	for _, e := range ents {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		exe, err := os.Readlink(filepath.Join("/proc", e.Name(), "exe"))
+		if err == nil && exe == target {
+			if proc, err := os.FindProcess(pid); err == nil {
+				_ = proc.Signal(syscall.SIGTERM)
+				killed = true
+			}
+		}
+	}
+	if killed {
+		fmt.Println("Stopped a running AEGIS Companion copy so it cannot re-create files.")
+		time.Sleep(500 * time.Millisecond)
+	}
+}

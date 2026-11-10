@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func companionBinaryName() string { return "AegisCompanion.exe" }
@@ -92,4 +93,11 @@ func libraryBackupDir() (string, error) {
 
 func uninstallTip() string {
 	return "Tip: if a stray AegisSuite-Uninstaller.exe remains inside an otherwise-empty\nfolder, delete that folder by hand - a running program cannot delete itself."
+}
+
+// killRunningCompanion terminates any running AegisCompanion.exe so
+// it cannot hold files open (or re-create them) during removal.
+func killRunningCompanion(dir string) {
+	_ = exec.Command("taskkill", "/IM", companionBinaryName(), "/F").Run()
+	time.Sleep(400 * time.Millisecond)
 }

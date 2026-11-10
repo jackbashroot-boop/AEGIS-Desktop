@@ -117,6 +117,7 @@ type UI struct {
 
 	liveRows *clickSet
 	selProg  string
+	dashList widget.List
 	liveList widget.List
 
 	mapList       widget.List
@@ -236,6 +237,7 @@ func newUI(core *Core) *UI {
 	for _, p := range []pageID{pgDash, pgLive, pgMap, pgLibrary, pgReports, pgLog, pgSettings} {
 		u.navClicks[p] = &widget.Clickable{}
 	}
+	u.dashList.List.Axis = layout.Vertical
 	u.liveList.List.Axis = layout.Vertical
 	u.mapList.List.Axis = layout.Vertical
 	u.libList.List.Axis = layout.Vertical
@@ -310,7 +312,12 @@ func runGUI(core *Core) {
 				if e.Err != nil {
 					core.Log.Errorf("window closed with error: %v", e.Err)
 				}
-				core.Server.Stop()
+				// Exit NOW (v1.7.3): Server.Stop() used to run first
+				// and waits for background report rebuilds - a stuck
+				// rebuild left the process alive with no window, so
+				// the app looked "minimized forever" after closing.
+				// os.Exit ends every goroutine anyway.
+				core.Log.Infof("window closed - exiting")
 				os.Exit(0)
 			case app.FrameEvent:
 				gtx := app.NewContext(&ops, e)

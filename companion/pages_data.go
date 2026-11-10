@@ -1178,9 +1178,21 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			// Settings is a REAL multi-item list (v1.7.4): it used
+			// to be one giant item, and Gio clamps a single oversized
+			// child to the viewport - so the scroll range ended
+			// early and the Wardrive-map buttons at the bottom were
+			// unreachable. Chunked items measure honestly.
+			const chunk = 3
+			nChunks := (len(form) + chunk - 1) / chunk
 			return withScrollBar(gtx, &u.setList, func(gtx layout.Context) layout.Dimensions {
-				return material.List(u.th, &u.setList).Layout(gtx, 1, func(gtx layout.Context, _ int) layout.Dimensions {
-					return layout.Flex{Axis: layout.Vertical}.Layout(gtx, form...)
+				return material.List(u.th, &u.setList).Layout(gtx, nChunks, func(gtx layout.Context, i int) layout.Dimensions {
+					lo := i * chunk
+					hi := lo + chunk
+					if hi > len(form) {
+						hi = len(form)
+					}
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx, form[lo:hi]...)
 				})
 			})
 		}),

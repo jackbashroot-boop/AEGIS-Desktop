@@ -25,7 +25,7 @@
 #include <time.h>
 #include <vector>
 
-static const char* kVer = "0.1.5";
+static const char* kVer = "0.1.4";
 static const char* kFw = "AEGIS HERALD 0.1.2";
 static TFT_eSPI tft;
 static SPIClass touchSPI(VSPI);
@@ -489,7 +489,7 @@ void setup() {
     if (c) { String h = c.readString(); h.trim(); g_chain = (uint32_t)strtoul(h.c_str(), nullptr, 16); c.close(); }
     tryJoinWiFi();
     loadDesktopCfg();
-    logEvent("boot", "{\"fw\":\"aegis-herald-0.1.5\"}");
+    logEvent("boot", "{\"fw\":\"aegis-herald-0.1.2\"}");
   }
   liveBegin();
   draw();
@@ -499,14 +499,10 @@ void setup() {
 // (5s -> 60s cap) without disturbing the scan schedule.
 static void netTick() {
   static uint32_t nextTry = 0, backoff = 5000;
-  if (!g_wifiSsidCfg.length()) return;   // no wifi.txt configured
-  if (WiFi.status() == WL_CONNECTED) { g_wifiJoined = true; backoff = 5000; return; }
-  // v0.1.5: also retry when the BOOT join failed - previously a failed
-  // first join meant HERALD never came back on the network at all.
+  if (!g_wifiJoined) return;
+  if (WiFi.status() == WL_CONNECTED) { backoff = 5000; return; }
   if ((int32_t)(millis() - nextTry) < 0) return;
-  WiFi.mode(WIFI_STA);
   WiFi.begin(g_wifiSsidCfg.c_str(), g_wifiPassCfg.c_str());
-  g_wifiJoined = false;
   nextTry = millis() + backoff;
   backoff = min<uint32_t>(backoff * 2 + 5000, 60000);
 }

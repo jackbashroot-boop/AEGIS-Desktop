@@ -1,6 +1,6 @@
 ====================================================================
   AEGIS FAMILY SUITE - what's inside, and what goes where
-  Suite v1.2.1 - bundles Companion v1.7.2
+  Suite v1.2.3 - bundles Companion v1.7.4
 ====================================================================
 
 THE PC PROGRAM

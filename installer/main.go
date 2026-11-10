@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	suiteVersion     = "1.2.1"
-	companionVersion = "1.7.2"
+	suiteVersion     = "1.2.3"
+	companionVersion = "1.7.4"
 	productName      = "AEGIS Companion"
 )
 
@@ -216,10 +216,22 @@ func uninstall(dir string, quiet bool) error {
 			return fmt.Errorf("could not move the Library aside (%w) - nothing was removed", err)
 		}
 	}
+	// Stop any live Companion from this folder first (v1.2.2 fix):
+	// a zombie copy left over from a window that never fully exited
+	// used to re-create the Library/config while we removed them,
+	// so uninstall looked like it "did nothing".
+	killRunningCompanion(dir)
 	_ = removeShortcuts(dir)
 	removeSelfCopy(dir) // best effort; on Windows a running copy survives, note it
-	if err := os.RemoveAll(dir); err != nil {
-		return fmt.Errorf("removing %s: %w", dir, err)
+	var rmErr error
+	for i := 0; i < 8; i++ {
+		if rmErr = os.RemoveAll(dir); rmErr == nil {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if rmErr != nil {
+		return fmt.Errorf("removing %s: %w", dir, rmErr)
 	}
 	fmt.Println("Removed. Your Library backup (if any) is where the line above says.")
 	if tip := uninstallTip(); tip != "" {

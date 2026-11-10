@@ -32,7 +32,7 @@ type Config struct {
 const (
 	defaultPort    = 8791
 	configFileName = "aegis-companion.json"
-	appVersion     = "1.7.2"
+	appVersion     = "1.7.4"
 )
 
 // exeDir is the folder the program lives in. Config, Library and logs sit

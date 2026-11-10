@@ -15,7 +15,7 @@ DESK = HOME / 'aegis-desktop'
 SRC = DESK / 'installer'
 BUILD = HOME / '.suite-build'
 OUTDIR = HOME / 'DOWNLOADS/SUITE-Aegis-Family'
-COMP_ZIP = HOME / 'DOWNLOADS/COMPANION-Aegis-Desktop/Aegis-Companion-Desktop-v1.7.2.zip'
+COMP_ZIP = HOME / 'DOWNLOADS/COMPANION-Aegis-Desktop/Aegis-Companion-Desktop-v1.7.4.zip'
 
 PROGRAMS = [  # (folder, zip path, blurb) - TALON absent on purpose
     ('PHOENIX', HOME/'DOWNLOADS/BLUE-Aegis-Phoenix/Aegis-Phoenix-v0.9.9-SD.zip'),
@@ -50,7 +50,7 @@ def make_payload(osname, comp_member, comp_arc):
         p = stage / f['path']
         f['sha256'] = sha(p)
         f['size'] = p.stat().st_size
-    manifest = {'suite': '1.2.1', 'companion': '1.7.2',
+    manifest = {'suite': '1.2.3', 'companion': '1.7.4',
                 'programs': [p for p, _ in PROGRAMS], 'files': files}
     (stage / 'suite-manifest.json').write_text(json.dumps(manifest, indent=2))
     out = BUILD / f'payload-{osname}.zip'
@@ -85,7 +85,7 @@ def main():
                        cwd=BUILD / 'src', env=e, check=True)
         print('built', name, f'{(OUTDIR/name).stat().st_size/1e6:.1f} MB', sha(OUTDIR / name))
     # one-download bundle of both installers
-    bundle = HOME / 'DOWNLOADS/SUITE-Aegis-Family/Aegis-Family-Suite-v1.2.1.zip'
+    bundle = HOME / 'DOWNLOADS/SUITE-Aegis-Family/Aegis-Family-Suite-v1.2.3.zip'
     with zipfile.ZipFile(bundle, 'w', zipfile.ZIP_DEFLATED) as z:
         for _, name in targets:
             zi = zipfile.ZipInfo(name)

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -85,6 +86,19 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	}
+
+	// Single instance (v1.7.3): a second long-lived copy used to
+	// start happily next to the first (its listener failed, its GUI
+	// opened anyway), and the zombie then re-created files after an
+	// uninstall - making uninstall look broken and "close" look
+	// like minimize. One lock listener on loopback ends that.
+	if ln, err := net.Listen("tcp", "127.0.0.1:8792"); err != nil {
+		fmt.Fprintln(os.Stderr, "AEGIS Companion is already running - close the other copy first (check your taskbar/dock).")
+		os.Exit(1)
+	} else {
+		defer ln.Close()
+		_ = ln
 	}
 
 	core.Store.Rebuild()

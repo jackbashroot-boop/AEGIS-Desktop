@@ -38,7 +38,7 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 		{"LIBRARY SIZE", humanBytes(u.core.Store.SizeBytes()), colCyan},
 	}
 
-	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+	children := []layout.FlexChild{
 		// stat cards row
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			children := make([]layout.FlexChild, 0, len(cards))
@@ -224,7 +224,7 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
 		// recent reports + activity
-		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Flexed(1.2, func(gtx layout.Context) layout.Dimensions {
 					return layout.Inset{Right: 10}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -233,6 +233,22 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 				}),
 				layout.Flexed(1, u.dashRecentActivity),
 			)
+		}),
+	}
+	const chunk = 2
+	nChunks := (len(children) + chunk - 1) / chunk
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+			return withScrollBar(gtx, &u.dashList, func(gtx layout.Context) layout.Dimensions {
+				return material.List(u.th, &u.dashList).Layout(gtx, nChunks, func(gtx layout.Context, i int) layout.Dimensions {
+					lo := i * chunk
+					hi := lo + chunk
+					if hi > len(children) {
+						hi = len(children)
+					}
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children[lo:hi]...)
+				})
+			})
 		}),
 	)
 }
