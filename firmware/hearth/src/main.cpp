@@ -16,7 +16,7 @@
 #include <Preferences.h>
 #include <vector>
 
-static const char* kVer = "0.1.6";
+static const char* kVer = "0.1.7";
 static const char* kFw = "AEGIS HEARTH 0.1.5";
 static M5Canvas cv(&M5Cardputer.Display);
 static const uint16_t C_BG = 0x0000, C_BAR = 0x3000, C_ACC = 0xFA20,
@@ -209,7 +209,7 @@ static void finishScan(int n) {
   g_netNext = millis() + 3000;   // rejoin home shortly after the scan
 }
 
-enum Screen { SCR_SPLASH, SCR_MENU, SCR_LIVE, SCR_ALERTS, SCR_BASE, SCR_ABOUT, SCR_SYNC, SCR_LIVETGL, SCR_ASYNCTGL };
+enum Screen { SCR_SPLASH, SCR_MENU, SCR_LIVE, SCR_ALERTS, SCR_BASE, SCR_ABOUT, SCR_SYNC, SCR_LIVETGL, SCR_ASYNCTGL, SCR_CSITGL };
 static Screen g_screen = SCR_SPLASH;
 static uint32_t g_bootMs = 0;
 struct MenuItem { const char* group; const char* label; Screen target; };
@@ -220,6 +220,7 @@ static const MenuItem kMenu[] = {
   { "WATCH",  "Sync to desktop", SCR_SYNC },
   { "SYSTEM", "Desktop live link", SCR_LIVETGL },
   { "SYSTEM", "Desktop auto-sync", SCR_ASYNCTGL },
+  { "SYSTEM", "Presence sense (CSI)", SCR_CSITGL },
   { "SYSTEM", "About HEARTH",    SCR_ABOUT },
 };
 static const int kMenuCount = sizeof(kMenu) / sizeof(kMenu[0]);
@@ -231,6 +232,81 @@ static String uptimeStr() {
   return String(b);
 }
 
+
+static bool g_csiOn = true;    // home Sentinel: on by default (menu can stop it)
+static int g_csiScore = 0;
+static bool g_csiPresent = false;
+
+// ------------------------------------------------- Wi-Fi CSI presence
+// EXPERIMENTAL presence/motion sensing from Wi-Fi Channel State
+// Info: the ESP32-S3 reports per-packet subcarrier amplitudes, and
+// people moving in a room make them wobble. This is a
+// self-calibrating motion score: presence/motion ONLY - no imaging,
+// no identification, nothing like the "Wi-Fi lidar" videos (that is
+// not physics this chip can do). Own/authorized spaces only.
+#include <esp_wifi.h>
+static volatile uint16_t g_csiRing[32];
+static volatile uint8_t g_csiRingIdx = 0;
+static volatile uint32_t g_csiPkts = 0;
+static void csiRxCb(void* ctx, wifi_csi_info_t* info) {
+  (void)ctx;
+  if (!info || !info->buf || info->len <= 0) return;
+  int n = info->len; if (n > 128) n = 128;
+  uint32_t e = 0;
+  for (int i = 0; i < n; i++) e += (uint32_t)abs((int)info->buf[i]);
+  g_csiRing[g_csiRingIdx] = (uint16_t)(e * 16 / (uint32_t)n);
+  g_csiRingIdx = (uint8_t)((g_csiRingIdx + 1) & 31);
+  g_csiPkts++;
+}
+static bool g_csiStarted = false;
+static float g_csiBase = 0;             // learned "calm room" variance
+static uint32_t g_csiLastTickMs = 0, g_csiLastEventMs = 0;
+static int g_csiHotSecs = 0;
+static bool csiBegin() {
+  wifi_csi_config_t cfg = {};
+  cfg.lltf_en = true; cfg.htltf_en = true; cfg.stbc_htltf2_en = true;
+  cfg.ltf_merge_en = true; cfg.channel_filter_en = false;
+  cfg.manu_scale = false; cfg.shift = 0;
+  if (esp_wifi_set_csi_config(&cfg) != ESP_OK) return false;
+  if (esp_wifi_set_csi_rx_cb(&csiRxCb, nullptr) != ESP_OK) return false;
+  if (esp_wifi_set_csi(true) != ESP_OK) return false;
+  g_csiStarted = true;
+  Serial.println("[CSI] presence sensing on");
+  return true;
+}
+static void csiStop() {
+  esp_wifi_set_csi(false);
+  g_csiStarted = false; g_csiPresent = false; g_csiScore = 0;
+  Serial.println("[CSI] presence sensing off");
+}
+static void csiTick() {
+  if (!g_csiOn) return;
+  if (!g_csiStarted) { if (WiFi.getMode() != WIFI_OFF) csiBegin(); return; }
+  const uint32_t now = millis();
+  if (now - g_csiLastTickMs < 1000) return;
+  g_csiLastTickMs = now;
+  uint16_t v[32];
+  for (int i = 0; i < 32; i++) v[i] = g_csiRing[i];
+  float mean = 0; for (int i = 0; i < 32; i++) mean += v[i];
+  mean /= 32.0f;
+  float var = 0; for (int i = 0; i < 32; i++) { const float d = v[i] - mean; var += d * d; }
+  const float sd = sqrtf(var / 32.0f);
+  if (g_csiBase < 1.0f) g_csiBase = sd > 1 ? sd : 20.0f;
+  if (sd < g_csiBase * 1.6f) g_csiBase = g_csiBase * 0.95f + sd * 0.05f;   // learn only when calm
+  const float ratio = g_csiBase > 0 ? sd / g_csiBase : 1.0f;
+  int score = (int)((ratio - 1.0f) * 45.0f);
+  g_csiScore = score < 0 ? 0 : (score > 100 ? 100 : score);
+  const bool hot = g_csiScore >= 45 && g_csiPkts > 20;
+  g_csiHotSecs = hot ? g_csiHotSecs + 1 : 0;
+  const bool was = g_csiPresent;
+  g_csiPresent = g_csiHotSecs >= 2;
+  if (g_csiPresent && !was && now - g_csiLastEventMs > 300000) {
+    g_csiLastEventMs = now;
+    g_alerts.push_back("MOTION in room (CSI " + String(g_csiScore) + ")");
+    if (g_alerts.size() > 40) g_alerts.erase(g_alerts.begin());
+    Serial.printf("[CSI] motion detected, score %d\n", g_csiScore);
+  }
+}
 
 // ---------------------------------------------------------- desktop sync
 // Push family logs to AEGIS COMPANION on the home LAN. Config:
@@ -479,6 +555,9 @@ static void liveUpdate() {
     strlcpy(s.state, "scanning", sizeof(s.state));
     strlcpy(s.detail, "Wi-Fi scan in progress", sizeof(s.detail));
     s.pct = min(99, (int)((millis() - g_scanStart) * 100 / 5000));
+  } else if (g_csiPresent) {
+    strlcpy(s.state, "presence", sizeof(s.state));
+    snprintf(s.detail, sizeof(s.detail), "motion/presence in room (Wi-Fi CSI %d/100)", g_csiScore);
   } else if (!g_alerts.empty()) {
     strlcpy(s.state, "alert", sizeof(s.state));
     snprintf(s.detail, sizeof(s.detail), "%u new-AP alert(s) - see Alerts", (unsigned)g_alerts.size());
@@ -566,6 +645,7 @@ static void draw() {
         cv.setCursor(66, y); cv.print(fit(String(kMenu[i].label), 26));
         if (kMenu[i].target == SCR_LIVETGL) { cv.setTextColor(g_liveEnabled ? C_OK : C_BAD, sel ? C_SEL : C_BG); cv.print(g_liveEnabled ? " ON" : " OFF"); }
         if (kMenu[i].target == SCR_ASYNCTGL) { cv.setTextColor(g_autoSync ? C_OK : C_BAD, sel ? C_SEL : C_BG); cv.print(g_autoSync ? " ON" : " OFF"); }
+        if (kMenu[i].target == SCR_CSITGL) { cv.setTextColor(g_csiOn ? C_OK : C_BAD, sel ? C_SEL : C_BG); cv.print(g_csiOn ? " ON" : " OFF"); }
         if (sel) { cv.setCursor(228, y); cv.print(">"); }
         y += 12;
       }
@@ -588,7 +668,8 @@ static void draw() {
       line(80, "baseline: " + String(g_hasBaseline ? (unsigned)g_baseline.size() : 0) + " known APs", C_DIM);
       line(94, g_alerts.empty() ? "no new-AP alerts" : (String(g_alerts.size()) + " alert(s) - see Alerts"),
            g_alerts.empty() ? C_OK : C_BAD);
-      line(108, "home: " + String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : (g_homeSsid.length() ? "joining..." : "not set")) + (g_liveEnabled ? " - live on" : " - live off"), C_DIM);
+      line(102, g_csiOn ? ("presence (CSI): " + String(g_csiPresent ? "MOTION " : "calm ") + g_csiScore + "/100") : "presence (CSI): off", g_csiPresent ? C_BAD : C_DIM);
+      line(114, "home: " + String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : (g_homeSsid.length() ? "joining..." : "not set")) + (g_liveEnabled ? " - live on" : " - live off"), C_DIM);
       line(118, g_status, C_DIM);
       foot("ENTER scan now - ESC menu");
       break;
@@ -666,6 +747,7 @@ static void onKey(const String& word, bool enter, bool del, bool tab, bool fn) {
       else if (enter) {
         if (kMenu[g_menuSel].target == SCR_LIVETGL) g_liveEnabled = !g_liveEnabled;
         else if (kMenu[g_menuSel].target == SCR_ASYNCTGL) g_autoSync = !g_autoSync;
+        else if (kMenu[g_menuSel].target == SCR_CSITGL) { g_csiOn = !g_csiOn; if (!g_csiOn) csiStop(); }
         else g_screen = kMenu[g_menuSel].target;
       }
       break;
@@ -720,6 +802,7 @@ void loop() {
     onKey(word, ks.enter, ks.del, ks.tab, ks.fn);
   }
   homeJoinTick(g_scanning);
+  csiTick();
   liveUpdate();
   autoSyncTick();
   if (!g_scanning && (int32_t)(millis() - g_nextScanMs) >= 0) startScan();

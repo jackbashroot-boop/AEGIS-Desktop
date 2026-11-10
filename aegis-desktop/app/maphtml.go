@@ -26,6 +26,9 @@ type mapJSONPoint struct {
 	Lat       float64 `json:"lat"`
 	Lon       float64 `json:"lon"`
 	Day       string  `json:"day,omitempty"`
+	Unc       float64 `json:"unc,omitempty"`
+	Fixes     int     `json:"fixes,omitempty"`
+	Method    string  `json:"method,omitempty"`
 	GMaps     string  `json:"gmaps"`
 }
 
@@ -46,6 +49,7 @@ func BuildMapHTML(d MapData) string {
 		pts = append(pts, mapJSONPoint{
 			SSID: p.SSID, BSSID: p.BSSID, Channel: p.Channel, RSSI: p.RSSI,
 			Sightings: p.Sightings, Lat: p.Lat, Lon: p.Lon, Day: p.Day,
+			Unc: p.UncertaintyM, Fixes: p.Observations, Method: p.Method,
 			GMaps: GoogleMapsURL(p.Lat, p.Lon),
 		})
 	}
@@ -55,9 +59,9 @@ func BuildMapHTML(d MapData) string {
 	var rows strings.Builder
 	for _, p := range d.Points {
 		fmt.Fprintf(&rows,
-			`<tr><td>%s</td><td class="mono">%s</td><td>%d</td><td style="color:%s">%d dBm</td><td>%d</td><td class="mono">%.6f, %.6f</td><td>%s</td><td><a href="%s" target="_blank" rel="noopener">Google Maps &#8599;</a></td></tr>`+"\n",
+			`<tr><td>%s</td><td class="mono">%s</td><td>%d</td><td style="color:%s">%d dBm</td><td>%d</td><td class="mono">%.6f, %.6f<br>±%.0f m · %d fix(es) · %s</td><td>%s</td><td><a href="%s" target="_blank" rel="noopener">Google Maps &#8599;</a></td></tr>`+"\n",
 			html.EscapeString(p.SSID), html.EscapeString(p.BSSID), p.Channel,
-			rssiColor(p.RSSI), p.RSSI, p.Sightings, p.Lat, p.Lon,
+			rssiColor(p.RSSI), p.RSSI, p.Sightings, p.Lat, p.Lon, p.UncertaintyM, p.Observations, html.EscapeString(p.Method),
 			html.EscapeString(p.Day), GoogleMapsURL(p.Lat, p.Lon))
 	}
 
@@ -85,10 +89,10 @@ func BuildMapHTML(d MapData) string {
 </style></head><body>
 <header><h1>AEGIS Wardrive Map</h1>
 <p>%d GPS-tagged network(s) &middot; %d route point(s), %.2f km &middot; day(s): %s<br>
-Each pin sits where that network's signal was <b>strongest</b> when seen. Click a pin for details and a Google Maps link.
+Each pin is a location <b>estimate</b>: repeated GPS sightings are combined with the strongest, cleanest fixes weighted most, and the circle is the estimated ± radius. More sightings from different sides of a network usually shrink that radius. Click a pin for details and a Google Maps link.
 <span class="legend"><span><i class="dot" style="background:#3ddc84"></i>strong (&ge;-60 dBm)</span><span><i class="dot" style="background:#ffb020"></i>medium</span><span><i class="dot" style="background:#ff5252"></i>weak</span></span></p></header>
 <div id="map"></div>
-<div class="wrap"><table><thead><tr><th>Network (SSID)</th><th>BSSID</th><th>Ch</th><th>Best signal</th><th>Seen</th><th>Best-sighting position</th><th>Day</th><th></th></tr></thead>
+<div class="wrap"><table><thead><tr><th>Network (SSID)</th><th>BSSID</th><th>Ch</th><th>Best signal</th><th>Seen</th><th>Estimated position</th><th>Day</th><th></th></tr></thead>
 <tbody>%s</tbody></table>
 <p style="color:#5b6578">Generated locally by AEGIS Companion from your own synced library. Nothing was uploaded; map tiles load from OpenStreetMap/CARTO only when this page is online.</p></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -105,7 +109,8 @@ L.control.layers({'Dark':dark,'Streets':streets}).addTo(map);
 var bounds = [];
 pts.forEach(function(p){
   var m = L.circleMarker([p.lat,p.lon],{radius:6,color:col(p.rssi),weight:2,fillColor:col(p.rssi),fillOpacity:0.55}).addTo(map);
-  m.bindPopup('<b>'+esc(p.ssid||'(hidden)')+'</b><br><span style="font-family:monospace">'+esc(p.bssid)+'</span><br>Channel '+p.ch+' &middot; best '+p.rssi+' dBm &middot; seen '+p.seen+'x<br><a href="'+p.gmaps+'" target="_blank" rel="noopener">Open in Google Maps &#8599;</a>');
+  if(p.unc>0){ L.circle([p.lat,p.lon],{radius:p.unc,color:col(p.rssi),weight:1,fillColor:col(p.rssi),fillOpacity:0.10}).addTo(map); }
+  m.bindPopup('<b>'+esc(p.ssid||'(hidden)')+'</b><br><span style="font-family:monospace">'+esc(p.bssid)+'</span><br>Channel '+p.ch+' &middot; best '+p.rssi+' dBm &middot; seen '+p.seen+'x<br>Estimated ±'+Math.round(p.unc||0)+' m from '+(p.fixes||0)+' GPS fix(es)<br><a href="'+p.gmaps+'" target="_blank" rel="noopener">Open in Google Maps &#8599;</a>');
   bounds.push([p.lat,p.lon]);
 });
 if(track && track.length>1){

@@ -29,6 +29,17 @@ type MapPoint struct {
 	Lat, Lon  float64
 	Day       string // library day the record came from, "" if unknown
 	Source    string // file the winning record came from
+
+	// Location-quality metadata (v1.8.4). Lat/Lon is no longer always
+	// one raw GPS point: when several sightings exist, LoadMapData
+	// robustly combines the strong, low-noise fixes and reports the
+	// resulting uncertainty instead of pretending a pin is exact.
+	AccuracyM    float64 // source-reported/estimated GPS error of the best fix, metres
+	UncertaintyM float64 // estimated radius around Lat/Lon, metres
+	Observations int     // valid GPS sightings combined into this estimate
+	Sats         int
+	HDOP         float64
+	Method       string
 }
 
 type MapData struct {
@@ -42,7 +53,239 @@ type MapData struct {
 }
 
 func validLatLon(lat, lon float64) bool {
-	return lat != 0 && lon != 0 && math.Abs(lat) <= 90 && math.Abs(lon) <= 180
+	if math.IsNaN(lat) || math.IsNaN(lon) || math.IsInf(lat, 0) || math.IsInf(lon, 0) {
+		return false
+	}
+	// (0,0) is the universal "no fix" sentinel, but a real point may
+	// legitimately sit on the equator or the prime meridian.
+	if lat == 0 && lon == 0 {
+		return false
+	}
+	return math.Abs(lat) <= 90 && math.Abs(lon) <= 180
+}
+
+// observationAccuracyM turns whatever quality evidence a record has
+// (reported accuracy, HDOP, satellites, or nothing) into a comparable
+// one-sigma-ish GPS error in metres. Unknown consumer GPS is assumed
+// mediocre, never magically precise.
+func observationAccuracyM(p MapPoint) float64 {
+	if p.AccuracyM > 0 && !math.IsNaN(p.AccuracyM) && !math.IsInf(p.AccuracyM, 0) {
+		return math.Max(3, math.Min(1000, p.AccuracyM))
+	}
+	if p.HDOP > 0 && p.HDOP < 20 {
+		return math.Max(5, math.Min(250, p.HDOP*5))
+	}
+	switch {
+	case p.Sats >= 12:
+		return 15
+	case p.Sats >= 8:
+		return 25
+	case p.Sats >= 5:
+		return 45
+	case p.Sats >= 4:
+		return 70
+	default:
+		return 90
+	}
+}
+
+func medianFloat(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	v := append([]float64(nil), vals...)
+	sort.Float64s(v)
+	n := len(v)
+	if n%2 == 1 {
+		return v[n/2]
+	}
+	return (v[n/2-1] + v[n/2]) / 2
+}
+
+func distanceM(lat1, lon1, lat2, lon2 float64) float64 {
+	return haversineKm(lat1, lon1, lat2, lon2) * 1000
+}
+
+// estimateMapPoint combines every valid sighting of one BSSID. The
+// strongest sighting anchors the estimate (for Wi-Fi, loudest usually
+// means nearest), nearby strong sightings refine it, and a lone GPS
+// spike is rejected when a cluster of other strong fixes disagrees.
+// Weights favour both stronger RSSI and lower GPS error. This is an
+// estimate, not triangulation magic: UncertaintyM says how far the
+// pin may reasonably be from the access point.
+func estimateMapPoint(obs []MapPoint) MapPoint {
+	valid := make([]MapPoint, 0, len(obs))
+	for _, p := range obs {
+		if validLatLon(p.Lat, p.Lon) {
+			valid = append(valid, p)
+		}
+	}
+	if len(valid) == 0 {
+		return MapPoint{}
+	}
+	best := valid[0]
+	for _, p := range valid[1:] {
+		pa, ba := observationAccuracyM(p), observationAccuracyM(best)
+		if p.RSSI > best.RSSI || (p.RSSI == best.RSSI && pa < ba) {
+			best = p
+		}
+	}
+	out := best
+	out.AccuracyM = observationAccuracyM(best)
+	out.UncertaintyM = out.AccuracyM
+	out.Observations = 1
+	out.Method = "strongest GPS fix"
+	if len(valid) == 1 {
+		out.Method = "single GPS fix"
+		return out
+	}
+
+	// Detect a strongest-point GPS spike: compare it with the median
+	// position of all other strong sightings. If four or more strong
+	// fixes cluster somewhere else, trust the cluster.
+	anchorLat, anchorLon := best.Lat, best.Lon
+	anchorIsOutlier := false
+	var strong []MapPoint
+	for _, p := range valid {
+		if p.RSSI >= best.RSSI-25 {
+			strong = append(strong, p)
+		}
+	}
+	if len(strong) >= 4 {
+		var lats, lons []float64
+		for _, p := range strong {
+			lats = append(lats, p.Lat)
+			lons = append(lons, p.Lon)
+		}
+		medLat, medLon := medianFloat(lats), medianFloat(lons)
+		if distanceM(best.Lat, best.Lon, medLat, medLon) > 250 {
+			anchorLat, anchorLon = medLat, medLon
+			anchorIsOutlier = true
+		}
+	}
+
+	radius := math.Max(150, math.Min(600, 4*out.AccuracyM))
+	if anchorIsOutlier {
+		radius = 300
+	}
+	var cand []MapPoint
+	for _, p := range valid {
+		if p.RSSI < best.RSSI-30 {
+			continue
+		}
+		if distanceM(p.Lat, p.Lon, anchorLat, anchorLon) <= radius {
+			cand = append(cand, p)
+		}
+	}
+	if len(cand) == 0 {
+		cand = []MapPoint{best}
+	}
+	if len(cand) == 1 {
+		out = cand[0]
+		out.AccuracyM = observationAccuracyM(cand[0])
+		out.UncertaintyM = out.AccuracyM
+		out.Observations = 1
+		if anchorIsOutlier {
+			out.Method = "GPS cluster (strongest point rejected)"
+		}
+		// Keep the globally strongest metadata even if its position was rejected.
+		out.RSSI = best.RSSI
+		return out
+	}
+
+	cosLat := math.Cos(anchorLat * math.Pi / 180)
+	if math.Abs(cosLat) < 0.05 {
+		if cosLat < 0 {
+			cosLat = -0.05
+		} else {
+			cosLat = 0.05
+		}
+	}
+	var sumW, sumX, sumY, sumAcc2 float64
+	for _, p := range cand {
+		acc := observationAccuracyM(p)
+		signalW := math.Pow(10, float64(p.RSSI-best.RSSI)/15)
+		w := signalW / (acc + 10)
+		x := (p.Lon - anchorLon) * 111320 * cosLat
+		y := (p.Lat - anchorLat) * 110540
+		sumW += w
+		sumX += w * x
+		sumY += w * y
+		sumAcc2 += w * acc * acc
+	}
+	estX, estY := sumX/sumW, sumY/sumW
+	// Do not let averaging drag a good anchor implausibly far away.
+	if !anchorIsOutlier {
+		if d := math.Hypot(estX, estY); d > 250 {
+			estX *= 250 / d
+			estY *= 250 / d
+		}
+	}
+	estLat := anchorLat + estY/110540
+	estLon := anchorLon + estX/(111320*cosLat)
+	var spread2 float64
+	for _, p := range cand {
+		acc := observationAccuracyM(p)
+		signalW := math.Pow(10, float64(p.RSSI-best.RSSI)/15)
+		w := signalW / (acc + 10)
+		x := (p.Lon - anchorLon) * 111320 * cosLat
+		y := (p.Lat - anchorLat) * 110540
+		spread2 += w * ((x-estX)*(x-estX) + (y-estY)*(y-estY))
+	}
+	uncertainty := math.Sqrt(spread2/sumW + sumAcc2/sumW)
+	out.Lat, out.Lon = estLat, estLon
+	out.UncertaintyM = math.Max(10, math.Min(750, uncertainty))
+	out.Observations = len(cand)
+	out.Method = "multi-fix weighted"
+	if anchorIsOutlier {
+		out.Method = "multi-fix weighted (strongest point rejected)"
+	}
+	// Sightings in aggregate files can describe the same raw records;
+	// retain the largest count instead of double-counting formats.
+	for _, p := range valid {
+		if p.Sightings > out.Sightings {
+			out.Sightings = p.Sightings
+		}
+	}
+	return out
+}
+
+func cleanTrack(track [][2]float64) [][2]float64 {
+	var out [][2]float64
+	for i, tp := range track {
+		if !validLatLon(tp[0], tp[1]) {
+			continue
+		}
+		if n := len(out); n > 0 && distanceM(out[n-1][0], out[n-1][1], tp[0], tp[1]) < 2 {
+			continue
+		}
+		// Reject an isolated GPS spike when the route immediately
+		// returns near the previous accepted point.
+		if n := len(out); n > 0 && i+1 < len(track) {
+			prev := out[n-1]
+			next := track[i+1]
+			if distanceM(prev[0], prev[1], tp[0], tp[1]) > 2000 && distanceM(prev[0], prev[1], next[0], next[1]) < 2000 {
+				continue
+			}
+		}
+		out = append(out, tp)
+	}
+	return out
+}
+
+func robustCenter(points []MapPoint, track [][2]float64) (float64, float64) {
+	if len(points) > 0 {
+		var lats, lons []float64
+		for _, p := range points {
+			lats = append(lats, p.Lat)
+			lons = append(lons, p.Lon)
+		}
+		return medianFloat(lats), medianFloat(lons)
+	}
+	if len(track) > 0 {
+		return track[0][0], track[0][1]
+	}
+	return 0, 0
 }
 
 func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
@@ -81,7 +324,7 @@ func dayOf(root, path string) string {
 // .jsonl records, and GPX tracks. Unknown files are ignored.
 func LoadMapData(root string) MapData {
 	var d MapData
-	best := map[string]MapPoint{}
+	observations := map[string][]MapPoint{}
 	daySet := map[string]bool{}
 	var track [][2]float64
 
@@ -121,23 +364,14 @@ func LoadMapData(root string) MapData {
 			if key == "" {
 				continue
 			}
-			old, ok := best[key]
-			if !ok || p.RSSI > old.RSSI {
-				if ok && old.Sightings > p.Sightings {
-					p.Sightings = old.Sightings
-				}
-				best[key] = p
-			} else if p.Sightings > old.Sightings {
-				old.Sightings = p.Sightings
-				best[key] = old
-			}
+			observations[key] = append(observations[key], p)
 		}
 		track = append(track, trk...)
 		return nil
 	})
 
-	for _, p := range best {
-		d.Points = append(d.Points, p)
+	for _, group := range observations {
+		d.Points = append(d.Points, estimateMapPoint(group))
 	}
 	sort.Slice(d.Points, func(i, j int) bool {
 		if d.Points[i].RSSI != d.Points[j].RSSI {
@@ -145,13 +379,7 @@ func LoadMapData(root string) MapData {
 		}
 		return d.Points[i].BSSID < d.Points[j].BSSID
 	})
-	// drop consecutive duplicate track points (GPS parked = same fix)
-	for _, tp := range track {
-		if n := len(d.Track); n > 0 && d.Track[n-1] == tp {
-			continue
-		}
-		d.Track = append(d.Track, tp)
-	}
+	d.Track = cleanTrack(track)
 	for i := 1; i < len(d.Track); i++ {
 		d.RouteKm += haversineKm(d.Track[i-1][0], d.Track[i-1][1], d.Track[i][0], d.Track[i][1])
 	}
@@ -159,17 +387,7 @@ func LoadMapData(root string) MapData {
 		d.Days = append(d.Days, day)
 	}
 	sort.Strings(d.Days)
-	if len(d.Points) > 0 {
-		var la, lo float64
-		for _, p := range d.Points {
-			la += p.Lat
-			lo += p.Lon
-		}
-		d.CenterLat = la / float64(len(d.Points))
-		d.CenterLon = lo / float64(len(d.Points))
-	} else if len(d.Track) > 0 {
-		d.CenterLat, d.CenterLon = d.Track[0][0], d.Track[0][1]
-	}
+	d.CenterLat, d.CenterLon = robustCenter(d.Points, d.Track)
 	return d
 }
 
@@ -236,6 +454,9 @@ func parseGeoJSON(path string) []MapPoint {
 			RSSI:      propInt(f.Properties, "best_rssi", "rssi", "RSSI"),
 			Sightings: propInt(f.Properties, "sightings", "seen"),
 			Lat:       lat, Lon: lon,
+			AccuracyM: propFloat(f.Properties, "accuracy_m", "accuracyMeters", "AccuracyMeters", "accuracy"),
+			Sats:      propInt(f.Properties, "sats", "satellites"),
+			HDOP:      propFloat(f.Properties, "hdop", "HDOP"),
 		})
 	}
 	return out
@@ -289,6 +510,9 @@ func parseMapCSV(path string) []MapPoint {
 			RSSI:      atoi(get(row, "best_rssi", "rssi")),
 			Sightings: atoi(get(row, "sightings")),
 			Lat:       lat, Lon: lon,
+			AccuracyM: atof(get(row, "accuracymeters", "accuracy_m", "accuracy", "gps_accuracy")),
+			Sats:      atoi(get(row, "sats", "satellites")),
+			HDOP:      atof(get(row, "hdop")),
 		})
 	}
 	return out
@@ -331,6 +555,9 @@ func parseSightingJSONL(path string) (pts []MapPoint, noGPS int) {
 			RSSI:      propInt(m, "rssi", "RSSI"),
 			Sightings: 1,
 			Lat:       lat, Lon: lon,
+			AccuracyM: propFloat(m, "acc", "accuracy_m", "accuracy", "AccuracyMeters"),
+			Sats:      propInt(m, "sats", "satellites"),
+			HDOP:      propFloat(m, "hdop", "HDOP"),
 		})
 	}
 	return pts, noGPS

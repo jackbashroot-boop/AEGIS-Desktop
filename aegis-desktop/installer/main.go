@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	suiteVersion     = "1.2.6"
-	companionVersion = "1.7.7"
+	suiteVersion     = "1.2.11"
+	companionVersion = "1.8.2"
 	productName      = "AEGIS Companion"
 )
 

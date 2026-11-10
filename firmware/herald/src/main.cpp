@@ -25,7 +25,7 @@
 #include <time.h>
 #include <vector>
 
-static const char* kVer = "0.1.4";
+static const char* kVer = "0.1.6";
 static const char* kFw = "AEGIS HERALD 0.1.2";
 static TFT_eSPI tft;
 static SPIClass touchSPI(VSPI);
@@ -237,12 +237,16 @@ static bool discoverDesktop() {
   udp.stop();
   return found;
 }
+static int g_mmState = 0;              // 0 none 1 moving 2 still 3 both
+static int g_mmDist = 0, g_mmMoveE = 0, g_mmStatE = 0;
+static bool g_mmSeen = false;
 struct LiveSnap { char state[16]; char detail[80]; char last[20]; int aps; uint32_t events; };
 static LiveSnap g_liveSnap = {"watching", "starting", "", 0, 0};
 static void liveUpdate() {
   LiveSnap s;
   if (g_scanning) { strlcpy(s.state, "scanning", sizeof(s.state)); strlcpy(s.detail, "Wi-Fi scan in progress", sizeof(s.detail)); }
   else if (!g_alerts.empty()) { strlcpy(s.state, "alert", sizeof(s.state)); snprintf(s.detail, sizeof(s.detail), "%u new-AP alert(s)", (unsigned)g_alerts.size()); }
+  else if (g_mmState > 0) { strlcpy(s.state, "presence", sizeof(s.state)); snprintf(s.detail, sizeof(s.detail), "mmWave presence: %s %dcm", g_mmState == 1 ? "MOVING" : (g_mmState == 2 ? "STILL" : "MOVING+STILL"), g_mmDist); }
   else { strlcpy(s.state, "watching", sizeof(s.state)); snprintf(s.detail, sizeof(s.detail), "baseline watch - %d known APs", g_hasBaseline ? (int)g_baseline.size() : 0); }
   strlcpy(s.last, g_lastKind, sizeof(s.last));
   s.aps = g_lastCount >= 0 ? g_lastCount : (int)g_baseline.size();
@@ -418,6 +422,8 @@ static void draw() {
          g_alerts.empty() ? C_OK : C_BAD);
     line(160, "SD " + String(g_sdOk ? "logging" : "ABSENT"), g_sdOk ? C_DIM : C_BAD);
     line(169, String("desktop: ") + (g_liveLinked ? "linked - streaming" : (g_deskHost.length() ? "auto-sync on" : "no desktop.txt")), g_liveLinked ? C_OK : C_DIM);
+    line(187, !g_mmSeen ? "mmWave: none wired (LD2410 -> IO22)" : (g_mmState == 0 ? "mmWave: room clear" : ("mmWave: " + String(g_mmState == 1 ? "MOVING " : (g_mmState == 2 ? "STILL " : "MOVE+STILL ")) + g_mmDist + " cm")),
+         g_mmState > 0 ? C_BAD : C_DIM);
     line(178, g_status, C_DIM);
   } else if (g_tab == 1) {
     tft.setTextSize(2); tft.setTextColor(C_ACC, C_BG); tft.setCursor(6, 30); tft.print("ALERTS");
@@ -442,6 +448,54 @@ static void draw() {
     line(156, "TALON is never linked. Ever.", C_WARN);
   }
   drawTabs();
+}
+
+
+// --------------------------------------------------- LD2410 mmWave
+// Optional HLK-LD2410 presence radar on the CYD's spare header:
+// module TX -> IO22 (P1 header), module RX -> IO27 (config, later),
+// VCC -> 5V, GND -> GND. Streams at 256000 baud; we parse the basic
+// target frames (state, moving/static distance + energy). Presence
+// only - distance + motion energy, no imaging. If no module ever
+// speaks, this stays silent and costs nothing.
+static int g_mmPrevState = 0;
+static void mmBegin() { Serial2.begin(256000, SERIAL_8N1, 22, 27); }
+static void mmTick() {
+  static uint8_t buf[80];
+  static int idx = 0;
+  static const uint8_t kHdr[4] = {0xFD, 0xFC, 0xFB, 0xFA};
+  while (Serial2.available()) {
+    const uint8_t b = (uint8_t)Serial2.read();
+    if (idx < 4) {
+      if (b == kHdr[idx]) { buf[idx++] = b; }
+      else idx = (b == 0xFD) ? 1 : 0;
+      if (idx == 1) buf[0] = b;
+      continue;
+    }
+    if (idx < (int)sizeof(buf)) buf[idx++] = b;
+    if (idx >= 6) {
+      const int len = buf[4] | (buf[5] << 8);
+      const int total = 4 + 2 + len + 4;
+      if (total > (int)sizeof(buf)) { idx = 0; continue; }
+      if (idx >= total) {
+        if (len >= 11 && buf[6] == 0x02 && buf[7] == 0xAA && buf[total - 4] == 0xF8) {
+          g_mmSeen = true;
+          g_mmState = buf[8];
+          const int md = buf[9] | (buf[10] << 8);
+          g_mmMoveE = buf[11];
+          const int sd = buf[12] | (buf[13] << 8);
+          g_mmStatE = buf[14];
+          g_mmDist = g_mmState == 1 ? md : (g_mmState == 2 ? sd : (md && sd ? min(md, sd) : max(md, sd)));
+          if (g_mmState != g_mmPrevState) {
+            logEvent("presence", "{\"src\":\"ld2410\",\"state\":" + String(g_mmState) + ",\"dist_cm\":" + String(g_mmDist) +
+                                 ",\"move_e\":" + String(g_mmMoveE) + ",\"still_e\":" + String(g_mmStatE) + "}");
+            g_mmPrevState = g_mmState;
+          }
+        }
+        idx = 0;
+      }
+    }
+  }
 }
 
 // ----------------------------------------------------------------- main
@@ -489,8 +543,9 @@ void setup() {
     if (c) { String h = c.readString(); h.trim(); g_chain = (uint32_t)strtoul(h.c_str(), nullptr, 16); c.close(); }
     tryJoinWiFi();
     loadDesktopCfg();
-    logEvent("boot", "{\"fw\":\"aegis-herald-0.1.2\"}");
+    logEvent("boot", "{\"fw\":\"aegis-herald-0.1.6\"}");
   }
+  mmBegin();
   liveBegin();
   draw();
 }
@@ -499,10 +554,14 @@ void setup() {
 // (5s -> 60s cap) without disturbing the scan schedule.
 static void netTick() {
   static uint32_t nextTry = 0, backoff = 5000;
-  if (!g_wifiJoined) return;
-  if (WiFi.status() == WL_CONNECTED) { backoff = 5000; return; }
+  if (!g_wifiSsidCfg.length()) return;   // no wifi.txt configured
+  if (WiFi.status() == WL_CONNECTED) { g_wifiJoined = true; backoff = 5000; return; }
+  // v0.1.5: also retry when the BOOT join failed - previously a failed
+  // first join meant HERALD never came back on the network at all.
   if ((int32_t)(millis() - nextTry) < 0) return;
+  WiFi.mode(WIFI_STA);
   WiFi.begin(g_wifiSsidCfg.c_str(), g_wifiPassCfg.c_str());
+  g_wifiJoined = false;
   nextTry = millis() + backoff;
   backoff = min<uint32_t>(backoff * 2 + 5000, 60000);
 }
@@ -510,6 +569,7 @@ static void netTick() {
 static String g_serLine;
 void loop() {
   netTick();
+  mmTick();
   liveUpdate();
   autoSyncTick();
   static bool bootWas = true;

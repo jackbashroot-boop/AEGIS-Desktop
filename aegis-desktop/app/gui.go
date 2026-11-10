@@ -131,6 +131,11 @@ type UI struct {
 	btnCancelArea widget.Clickable
 	btnSavedOnly  widget.Clickable
 	btnSaveHome   widget.Clickable
+	btnSaveZip    widget.Clickable
+	btnRefineHome widget.Clickable
+	homeZipEd     widget.Editor
+	trayChk       widget.Bool
+	tray          *trayManager
 	btnDeleteArea widget.Clickable
 	btnExportPack widget.Clickable
 	btnImportPack widget.Clickable
@@ -188,6 +193,15 @@ type UI struct {
 	btnOpenLib   widget.Clickable
 	settingsMsg  string
 
+	btnReadiness     widget.Clickable
+	btnPublishFw     widget.Clickable
+	homeSSIDEd       widget.Editor
+	homeDevEd        widget.Editor
+	btnSavePresence  widget.Clickable
+	btnFwCheck       widget.Clickable
+	btnFwFetch       widget.Clickable
+	btnSyncAll       widget.Clickable
+	fwRows           *clickSet
 	btnCheckUpdate   widget.Clickable
 	btnInstallUpdate widget.Clickable
 	btnUninstall     widget.Clickable
@@ -197,7 +211,8 @@ type UI struct {
 	updateFound      string // human description of a staged update
 	updatePath       string // installer to run ("" = none staged)
 	updateSeenMsg    string // last async update-check message shown
-	toastText        string // top failure banner (v1.7.2)
+	toastText        string // top banner (v1.7.2; green=good since v1.7.9)
+	toastIsGood      bool
 	toastUntil       time.Time
 	seenSettingsMsg  string
 	seenMapMsg       string
@@ -230,6 +245,7 @@ func newUI(core *Core) *UI {
 		core: core, th: th, page: pgDash,
 		navClicks: map[pageID]*widget.Clickable{},
 		liveRows:  newClickSet(), libDays: newClickSet(), libProgs: newClickSet(),
+		fwRows:  newClickSet(),
 		mapRows: newClickSet(), famRows: newClickSet(), mapReal: true,
 		areaProg: newAreaProgress(),
 		repRows:  newClickSet(), repExpand: newClickSet(), expanded: map[string]bool{},
@@ -257,6 +273,12 @@ func newUI(core *Core) *UI {
 	u.hostEd.SetText(preferredLANIP())
 	u.homeLatEd.SingleLine = true
 	u.homeLonEd.SingleLine = true
+	u.homeZipEd.SingleLine = true
+	u.homeZipEd.SetText(core.Cfg.HomeZip)
+	u.trayChk.Value = core.Cfg.MinToTray
+	u.homeSSIDEd.SingleLine = true
+	u.homeSSIDEd.SetText(core.Cfg.HomeSSID)
+	u.homeDevEd.SetText(core.Cfg.HomeDevices)
 	if core.Cfg.HomeLat != 0 || core.Cfg.HomeLon != 0 {
 		u.homeLatEd.SetText(fmt.Sprintf("%.5f", core.Cfg.HomeLat))
 		u.homeLonEd.SetText(fmt.Sprintf("%.5f", core.Cfg.HomeLon))
@@ -291,43 +313,72 @@ func (u *UI) offlineArea(root string) (OfflineArea, bool) {
 }
 
 func runGUI(core *Core) {
+	u := newUI(core)
+	tm := newTrayManager()
+	u.tray = tm
+	if core.Cfg.MinToTray {
+		tm.start()
+	}
+	// One update check per run (v1.7.1): fetches only the tiny
+	// latest.json; nothing downloads without a click.
+	startUpdateCheck(core.Cfg)
+	startPresence(core)
 	go func() {
-		w := new(app.Window)
-		w.Option(app.Title("AEGIS Companion"), app.Size(1200, 780), app.MinSize(940, 620))
-		u := newUI(core)
-		// One update check per run (v1.7.1): fetches only the tiny
-		// latest.json; nothing downloads without a click.
-		startUpdateCheck(core.Cfg)
-		// Live data changes outside the frame loop; keep the window fresh.
-		go func() {
-			t := time.NewTicker(600 * time.Millisecond)
-			defer t.Stop()
-			for range t.C {
-				w.Invalidate()
-			}
-		}()
-		var ops op.Ops
 		for {
-			switch e := w.Event().(type) {
-			case app.DestroyEvent:
-				if e.Err != nil {
-					core.Log.Errorf("window closed with error: %v", e.Err)
-				}
-				// Exit NOW (v1.7.3): Server.Stop() used to run first
-				// and waits for background report rebuilds - a stuck
-				// rebuild left the process alive with no window, so
-				// the app looked "minimized forever" after closing.
-				// os.Exit ends every goroutine anyway.
-				core.Log.Infof("window closed - exiting")
-				os.Exit(0)
-			case app.FrameEvent:
-				gtx := app.NewContext(&ops, e)
-				u.layout(gtx)
-				e.Frame(gtx.Ops)
+			if !runWindowOnce(core, u, tm) {
+				return
 			}
+			// Window was closed into the tray: park here until the
+			// tray menu asks for the dashboard back.
+			<-tm.openCh
 		}
 	}()
 	app.Main()
+}
+
+// runWindowOnce runs one window until it is destroyed. It returns
+// true when the process should stay alive in the tray, false never
+// (quitting still goes through os.Exit, as before) - the bool is
+// simply "reopen when the tray asks".
+func runWindowOnce(core *Core, u *UI, tm *trayManager) bool {
+	w := new(app.Window)
+	w.Option(app.Title("AEGIS Companion v"+appVersion), app.Size(1200, 780), app.MinSize(940, 620))
+	// Live data changes outside the frame loop; keep the window fresh.
+	stopTick := make(chan struct{})
+	go func() {
+		t := time.NewTicker(600 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopTick:
+				return
+			case <-t.C:
+				w.Invalidate()
+			}
+		}
+	}()
+	var ops op.Ops
+	for {
+		switch e := w.Event().(type) {
+		case app.DestroyEvent:
+			close(stopTick)
+			if e.Err != nil {
+				core.Log.Errorf("window closed with error: %v", e.Err)
+			}
+			if core.Cfg.MinToTray && tm.active() {
+				core.Log.Infof("window closed - still running in the system tray (tray icon: Open Dashboard / Quit)")
+				return true
+			}
+			// Exit NOW (v1.7.3): os.Exit ends every goroutine anyway;
+			// a graceful stop once left zombie processes behind.
+			core.Log.Infof("window closed - exiting")
+			os.Exit(0)
+		case app.FrameEvent:
+			gtx := app.NewContext(&ops, e)
+			u.layout(gtx)
+			e.Frame(gtx.Ops)
+		}
+	}
 }
 
 // ---- shared building blocks ----
@@ -557,7 +608,7 @@ func ago(t time.Time) string {
 }
 
 // openPath opens a file/folder/URL with the OS default handler.
-func openPath(target string) {
+func openPath(target string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
@@ -567,12 +618,17 @@ func openPath(target string) {
 	default:
 		cmd = exec.Command("xdg-open", target)
 	}
-	_ = cmd.Start()
+	return cmd.Start()
 }
 
 // ---- shell layout ----
 
 func (u *UI) layout(gtx layout.Context) layout.Dimensions {
+	if u.page == pgDash || u.page == pgSettings {
+		// Animated family art (PHOENIX/TALON GIFs) needs a steady
+		// frame clock while its pages are on screen.
+		gtx.Execute(op.InvalidateCmd{At: time.Now().Add(120 * time.Millisecond)})
+	}
 	u.watchToastSources()
 	return layout.Stack{}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {

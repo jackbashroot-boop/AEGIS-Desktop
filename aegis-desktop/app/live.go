@@ -32,6 +32,10 @@ type DeviceLive struct {
 	HasAPs    bool
 	Pct       int // progress % of a long operation, -1 when none
 	Events    int
+	GPSAcc    int // optional GNSS estimated accuracy, metres (PHOENIX 0.12.7+)
+	HasGPSAcc bool
+	GPSRej    int // optional count of rejected impossible GPS jumps
+	HasGPSRej bool
 	FirstSeen time.Time
 	LastSeen  time.Time
 	Frames    int
@@ -64,6 +68,10 @@ type Frame struct {
 	HasPct   bool
 	Events   int
 	HasEvts  bool
+	GPSAcc   int
+	HasGPS   bool
+	GPSRej   int
+	HasGPSR  bool
 }
 
 func (r *LiveRegistry) Update(f Frame) {
@@ -99,6 +107,12 @@ func (r *LiveRegistry) Update(f Frame) {
 	}
 	if f.HasEvts {
 		d.Events = f.Events
+	}
+	if f.HasGPS {
+		d.GPSAcc, d.HasGPSAcc = f.GPSAcc, true
+	}
+	if f.HasGPSR {
+		d.GPSRej, d.HasGPSRej = f.GPSRej, true
 	}
 	d.LastSeen = now
 	d.Frames++

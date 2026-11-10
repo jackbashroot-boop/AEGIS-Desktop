@@ -1,7 +1,37 @@
 ====================================================================
-  AEGIS COMPANION v1.7.7 - desktop program for Linux + Windows
+  AEGIS COMPANION v1.7.9 - desktop program for Linux + Windows
   The full-UI rewrite (native, no Python needed). Protocol AEGIS/1.
 ====================================================================
+
+WHAT'S NEW IN 1.7.9
+  * ACTIVE PING DISCOVERY (user request): the Companion now
+    pings the network every 15 s; Cardputers carrying the SD
+    link file answer with name + firmware (PHOENIX 0.12.2+).
+    Dashboard gains "On your network right now". Finding is
+    not linking - the device still asks you to approve.
+  * PROGRESS + HONEST BANNERS: update checks/downloads show a
+    progress bar under the buttons; every finished check raises
+    a banner - GREEN when it worked, RED when it didn't.
+  * FEED BUG FIXED (audit find): latest.json files this project
+    ships use a nested per-OS shape the updater ignored, so
+    "Install update" could never have worked from the repo feed.
+    Both shapes now parse (regression-tested).
+  * ANIMATED ART: PHOENIX (flapping) and TALON (pulsing) family
+    badges are real animated GIFs now.
+
+WHAT'S NEW IN 1.7.8
+  * UNINSTALL CAN'T TRAP YOU (user report: "won't uninstall
+    itself"): the in-app uninstaller now launches non-
+    interactively, and if the staged suite uninstaller is
+    missing (older installs) the Companion removes ITSELF with
+    a detached cleanup script - Library still moved to
+    Aegis-Library-Backup, never deleted.
+  * UPDATE CHECK SPEAKS UP: every completed check (found /
+    up-to-date / failed) raises a banner; a 404 explains the
+    repo is private or the release unpublished, and the fix.
+  * Settings forces vertical scrolling every frame; folder
+    buttons report failures instead of shrugging silently.
+  * Window title shows the version (AEGIS Companion v1.7.8).
 
 WHAT'S NEW IN 1.7.7
   * SETTINGS, FIXED PROPERLY (user report: "wardriving setup

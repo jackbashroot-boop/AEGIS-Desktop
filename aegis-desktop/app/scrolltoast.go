@@ -71,7 +71,14 @@ func withScrollBar(gtx layout.Context, l *widget.List, w layout.Widget) layout.D
 
 // toastState lives on UI (fields declared in gui.go).
 func (u *UI) toast(text string, seconds int) {
-	u.toastText = text
+	u.toastText, u.toastIsGood = text, false
+	u.toastUntil = time.Now().Add(time.Duration(seconds) * time.Second)
+}
+
+// toastGood is the green "it worked" banner (v1.7.9) - the user
+// asked that a click visibly DID something, success included.
+func (u *UI) toastGood(text string, seconds int) {
+	u.toastText, u.toastIsGood = text, true
 	u.toastUntil = time.Now().Add(time.Duration(seconds) * time.Second)
 }
 
@@ -135,7 +142,11 @@ func (u *UI) toastBanner(gtx layout.Context) layout.Dimensions {
 	}
 	return layout.Inset{Top: 10, Left: 22, Right: 22}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 		return bgFill(gtx, colToastBg, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-			return u.label(12.5, colRed, u.toastText).Layout(gtx)
+			col := colRed
+			if u.toastIsGood {
+				col = colGreen
+			}
+			return u.label(12.5, col, u.toastText).Layout(gtx)
 		}))
 	})
 }

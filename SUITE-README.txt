@@ -1,6 +1,6 @@
 ====================================================================
   AEGIS FAMILY SUITE - what's inside, and what goes where
-  Suite v1.2.4 - bundles Companion v1.7.5
+  Suite v1.2.11 - bundles Companion v1.8.2
 ====================================================================
 
 THE PC PROGRAM
@@ -13,7 +13,7 @@ THE PC PROGRAM
   and writes plain-English reports.
 
 THE DEVICE PROGRAMS (Suite/ folder - one package per program)
-  PHOENIX v0.10.0  - Cardputer ADV. Blue-team Sentinel: wardriving,
+  PHOENIX v0.11.0  - Cardputer ADV. Blue-team Sentinel: wardriving,
                     passive scans, get-home sync. The collector.
   SCRIBE  v0.1.7  - Cardputer ADV. Field notebook; hash-chained,
                     tamper-evident notes; syncs at home.

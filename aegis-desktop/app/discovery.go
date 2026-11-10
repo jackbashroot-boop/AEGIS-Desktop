@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -27,10 +28,29 @@ type Discovery struct {
 	lastBy map[string]time.Time // sender IP -> last discovery seen
 	seen   map[string]bool      // sender IPs already logged once
 	done   chan struct{}
+
+	// Active ping (v1.7.9): every ~15 s we broadcast AEGIS_PING and
+	// Cardputers holding the SD link file answer AEGIS_CARD with
+	// prog/fw/mac + an HMAC proof, so the Dashboard can FIND and
+	// name devices before any link exists. Finding is not linking:
+	// the on-device ENTER confirmation still gates connections.
+	found     map[string]*FoundDevice
+	pingNonce string
+	pingAt    time.Time
+}
+
+// FoundDevice is one AEGIS device this Companion has located on
+// the LAN (by answering its shout, or by replying to our ping).
+type FoundDevice struct {
+	Prog     string // "" until a ping answer names it
+	Ver      string
+	MAC      string
+	IP       string
+	LastSeen time.Time
 }
 
 func NewDiscovery(token string, log *Log) *Discovery {
-	return &Discovery{token: token, log: log, lastBy: map[string]time.Time{}, seen: map[string]bool{}}
+	return &Discovery{token: token, log: log, lastBy: map[string]time.Time{}, seen: map[string]bool{}, found: map[string]*FoundDevice{}}
 }
 
 // discoveryMAC is the single source of truth for the reply proof;
@@ -77,6 +97,7 @@ func (d *Discovery) Start(port int) error {
 	d.conn, d.port, d.done = conn, port, make(chan struct{})
 	d.mu.Unlock()
 	go d.loop(conn, d.done)
+	go d.pinger(conn, d.done)
 	d.log.Infof("discovery responder on udp :%d - Cardputers can find this computer automatically", port)
 	return nil
 }
@@ -95,6 +116,61 @@ func (d *Discovery) Running() (int, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.port, d.conn != nil
+}
+
+// pingMAC proves an AEGIS_CARD answer: HMAC of the ping nonce,
+// keyed by the shared token (the firmware computes the same).
+func pingMAC(token, nonce string) string {
+	m := hmac.New(sha256.New, []byte(token))
+	m.Write([]byte("AEGIS_PING:" + nonce))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// parseCard validates an AEGIS_CARD answer packet.
+func parseCard(pkt []byte) (prog, ver, mac, proof string, ok bool) {
+	f := strings.Fields(string(pkt))
+	if len(f) != 6 || f[0] != "AEGIS_CARD" || f[1] != "1" {
+		return "", "", "", "", false
+	}
+	return f[2], f[3], f[4], f[5], true
+}
+
+func (d *Discovery) noteFound(ip, prog, ver, mac string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fd := d.found[ip]
+	if fd == nil {
+		fd = &FoundDevice{IP: ip}
+		d.found[ip] = fd
+	}
+	if prog != "" {
+		known := fd.Prog
+		fd.Prog, fd.Ver, fd.MAC = prog, ver, mac
+		if known == "" {
+			d.log.Infof("discovery: found %s (fw %s) at %s via active ping", prog, ver, ip)
+		}
+	}
+	fd.LastSeen = time.Now()
+}
+
+// Found lists devices located in the last 5 minutes, freshest first.
+func (d *Discovery) Found() []FoundDevice {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]FoundDevice, 0, len(d.found))
+	for ip, fd := range d.found {
+		if time.Since(fd.LastSeen) > 5*time.Minute {
+			delete(d.found, ip)
+			continue
+		}
+		out = append(out, *fd)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j].LastSeen.After(out[j-1].LastSeen); j-- {
+			out[j], out[j-1] = out[j-1], out[j]
+		}
+	}
+	return out
 }
 
 // LastSeen returns when any device last went looking for us.
@@ -126,10 +202,20 @@ func (d *Discovery) loop(conn *net.UDPConn, done chan struct{}) {
 				continue
 			}
 		}
+		if prog, ver, mac, proof, ok := parseCard(buf[:n]); ok {
+			d.mu.Lock()
+			nonce, at := d.pingNonce, d.pingAt
+			d.mu.Unlock()
+			if nonce != "" && time.Since(at) < 90*time.Second && proof == pingMAC(d.token, nonce) {
+				d.noteFound(from.IP.String(), prog, ver, mac)
+			}
+			continue
+		}
 		nonce, ok := parseDiscovery(buf[:n])
 		if !ok {
 			continue
 		}
+		d.noteFound(from.IP.String(), "", "", "")
 		ip := from.IP.String()
 		d.mu.Lock()
 		if prev, seen := d.lastBy[ip]; seen && time.Since(prev) < time.Second {
@@ -145,5 +231,33 @@ func (d *Discovery) loop(conn *net.UDPConn, done chan struct{}) {
 			d.log.Infof("discovery: a Cardputer at %s is looking for this computer - answering", ip)
 		}
 		_, _ = conn.WriteToUDP([]byte(discoveryReply(d.token, port, nonce)), from)
+	}
+}
+
+// pinger broadcasts AEGIS_PING every 15 s so link-carrying
+// Cardputers can announce themselves (see noteFound).
+func (d *Discovery) pinger(conn *net.UDPConn, done chan struct{}) {
+	send := func() {
+		var raw [16]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return
+		}
+		nonce := hex.EncodeToString(raw[:])
+		d.mu.Lock()
+		d.pingNonce, d.pingAt = nonce, time.Now()
+		d.mu.Unlock()
+		_, _ = conn.WriteToUDP([]byte("AEGIS_PING 1 "+nonce+"\n"),
+			&net.UDPAddr{IP: net.IPv4bcast, Port: 8791})
+	}
+	send()
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-t.C:
+			send()
+		}
 	}
 }

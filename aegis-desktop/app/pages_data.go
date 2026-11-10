@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -492,11 +493,23 @@ func (u *UI) pageLog(gtx layout.Context) layout.Dimensions {
 // ---------------- Settings ----------------
 
 func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
+	u.setList.List.Axis = layout.Vertical // paranoia (v1.7.8): Settings scrolls UP/DOWN, never sideways
 	cfg := u.core.Cfg
 
 	// Async update check/download (v1.7.1) reports through here.
 	if st := updateSnapshot(); st.msg != "" && st.msg != u.updateSeenMsg {
 		u.updateSeenMsg = st.msg
+		if !st.busy {
+			// Every completed check announces itself (v1.7.8) - a
+			// quiet "up to date" used to look like a dead button.
+			// Green for good news; failures ALSO arrive via the
+			// settingsMsg watcher as a red banner.
+			if looksLikeFailure(st.msg) {
+				u.toast("⚠ "+st.msg, 9)
+			} else {
+				u.toastGood("✓ "+st.msg, 7)
+			}
+		}
 		u.settingsMsg = st.msg
 		if st.stagedPath != "" {
 			u.updatePath = st.stagedPath
@@ -565,6 +578,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 	}
 	if u.btnCheckUpdate.Clicked(gtx) {
 		u.updatePath = ""
+		u.toastGood("Checking for updates - GitHub feed + local Updates folder...", 4)
 		startUpdateCheck(cfg)
 		u.core.Log.Infof("update check started (local Updates folder + feed %s)", cfg.UpdateFeed)
 	}
@@ -582,10 +596,25 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				os.Exit(0) // the installer upgrades in place; get out of its way
 			}
 		case st.haveRemote:
+			u.toastGood("Downloading the update - progress bar below, SHA-256 verified before anything runs.", 5)
 			startUpdateDownload(cfg)
 			u.core.Log.Infof("update download started for v%s", st.latest.Version)
 		default:
 			u.settingsMsg = "Check for updates first - no staged installer to run."
+		}
+	}
+	if u.btnPublishFw.Clicked(gtx) {
+		startPublishFirmware(cfg, u.core.Log)
+		u.toastGood("Publishing the staged PHOENIX to GitHub via your gh login - watch the Updates status here / Dashboard.", 6)
+	}
+	if u.btnSavePresence.Clicked(gtx) {
+		cfg.HomeSSID = strings.TrimSpace(u.homeSSIDEd.Text())
+		cfg.HomeDevices = u.homeDevEd.Text()
+		if err := cfg.Save(); err != nil {
+			u.settingsMsg = "Could not save presence settings: " + err.Error()
+		} else {
+			u.settingsMsg = "Presence saved. The Dashboard's Home presence card uses your Wi-Fi radio: motion ripple on '" + cfg.HomeSSID + "', plus who's-home for the devices you named."
+			u.core.Log.Infof("presence settings saved (ssid %q, %d named devices)", cfg.HomeSSID, len(parseHomeDevices(cfg.HomeDevices)))
 		}
 	}
 	if u.btnApplyFeed.Clicked(gtx) {
@@ -617,19 +646,29 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 					u.core.Log.Warnf("uninstaller launched from Settings - closing")
 					os.Exit(0)
 				}
+			} else if err := selfUninstall(); err == nil {
+				// Built-in fallback (v1.7.8): no staged uninstaller
+				// (older install) - remove ourselves with a detached
+				// script instead of shrugging.
+				u.core.Log.Warnf("self-uninstall script launched from Settings - closing")
+				os.Exit(0)
 			} else {
 				// Portable copy: no suite uninstaller staged. Remove
 				// the menu entry here and give exact manual steps.
 				_ = removeShortcut()
-				u.settingsMsg = "This copy was not installed by the suite installer, so there is no staged uninstaller. I removed the app-menu/Start shortcut. To finish: close this program and delete its folder (" + exeDir() + "). Your Library inside it is yours to keep or delete - nothing else was installed anywhere."
+				u.settingsMsg = "Automatic removal could not start (" + err.Error() + "). I removed the app-menu/Start shortcut. To finish manually: close this program and delete its folder (" + exeDir() + "). Your Library inside it is yours to keep or delete - nothing else was installed anywhere."
 			}
 		}
 	}
 	if u.btnOpenCfg.Clicked(gtx) {
-		openPath(exeDir())
+		if err := openPath(exeDir()); err != nil {
+			u.settingsMsg = "Could not open the program folder: " + err.Error()
+		}
 	}
 	if u.btnOpenLib.Clicked(gtx) {
-		openPath(u.core.Cfg.Library)
+		if err := openPath(u.core.Cfg.Library); err != nil {
+			u.settingsMsg = "Could not open the Library folder: " + err.Error()
+		}
 	}
 	if u.btnClearTiles.Clicked(gtx) {
 		if err := ClearTileCache(u.core.Cfg.Library); err != nil {
@@ -642,6 +681,50 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			u.core.Log.Infof("map tile cache cleared from Settings")
 		}
 	}
+	if u.trayChk.Value != cfg.MinToTray {
+		cfg.MinToTray = u.trayChk.Value
+		_ = cfg.Save()
+		if cfg.MinToTray {
+			if u.tray != nil {
+				u.tray.start()
+			}
+			u.settingsMsg = "System tray ON: closing the window now tucks Aegis into the tray - devices stay linked and updates keep checking. Right-click the tray icon for Open Dashboard or Quit."
+		} else {
+			if u.tray != nil {
+				u.tray.stop()
+			}
+			u.settingsMsg = "System tray OFF: closing the window quits Aegis Companion completely."
+		}
+		u.core.Log.Infof("minimize-to-tray set to %v from Settings", cfg.MinToTray)
+	}
+	if u.btnSaveZip.Clicked(gtx) {
+		zip, zerr := normalizeZip(u.homeZipEd.Text())
+		if zerr != nil {
+			u.settingsMsg = zerr.Error()
+		} else {
+			u.settingsMsg = "Looking up ZIP " + zip + " (one quick internet lookup)..."
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				lat, lon, place, accuracyM, err := geocodeZipDetailed(ctx, zip)
+				if err != nil {
+					u.settingsMsg = err.Error()
+					u.core.Log.Warnf("ZIP home lookup failed: %v", err)
+					return
+				}
+				cfg.HomeLat, cfg.HomeLon, cfg.HomeZip, cfg.HomePlace = lat, lon, zip, place
+				cfg.HomeAccuracyM, cfg.HomeSource = accuracyM, "ZIP code area centre"
+				if err := cfg.Save(); err != nil {
+					u.settingsMsg = "Found " + place + " but could not save it: " + err.Error()
+					return
+				}
+				u.homeLatEd.SetText(fmt.Sprintf("%.5f", lat))
+				u.homeLonEd.SetText(fmt.Sprintf("%.5f", lon))
+				u.settingsMsg = fmt.Sprintf("Home set from ZIP %s: %s (%.5f, %.5f). That is the ZIP area centre (about ±%.1f km), not your rooftop. For a closer centre, use an exact dropped-pin coordinate or GPS-refine it after wardriving around the property. Now save the offline map around it (button below).", zip, place, lat, lon, accuracyM/1000)
+				u.core.Log.Infof("home location set from ZIP %s -> %.5f, %.5f (%s), ±%.0f m", zip, lat, lon, place, accuracyM)
+			}()
+		}
+	}
 	if u.btnSaveHome.Clicked(gtx) {
 		lat, err1 := strconv.ParseFloat(strings.TrimSpace(u.homeLatEd.Text()), 64)
 		lon, err2 := strconv.ParseFloat(strings.TrimSpace(u.homeLonEd.Text()), 64)
@@ -650,13 +733,54 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			u.settingsMsg = "Home location needs a latitude (-85 to 85) and a longitude (-180 to 180) - for example 41.5247 and -72.0759."
 		default:
 			cfg.HomeLat, cfg.HomeLon = lat, lon
+			cfg.HomeZip, cfg.HomePlace = "", ""
+			cfg.HomeAccuracyM, cfg.HomeSource = 15, "typed coordinates"
+			u.homeZipEd.SetText("")
 			if err := cfg.Save(); err != nil {
 				u.settingsMsg = "Could not save the home location: " + err.Error()
 			} else {
-				u.settingsMsg = fmt.Sprintf("Home set to %.5f, %.5f. Now save the 100x100-mile offline map around it (button below, or on the Wardrive Map page).", lat, lon)
+				u.settingsMsg = fmt.Sprintf("Home set to %.5f, %.5f (typed coordinates; recorded as ±15 m, so use an exact dropped pin rather than a town centre). Now save the 100x100-mile offline map around it (button below, or on the Wardrive Map page).", lat, lon)
 				u.core.Log.Infof("home location set to %.5f, %.5f", lat, lon)
 			}
 		}
+	}
+	if u.btnRefineHome.Clicked(gtx) {
+		ssid := strings.TrimSpace(u.homeSSIDEd.Text())
+		if ssid == "" {
+			ssid = cfg.HomeSSID
+		}
+		u.settingsMsg = "Combining the GPS sightings of your home network..."
+		go func() {
+			lat, lon, uncertaintyM, fixes, err := RefineHomeFromSSID(cfg.Library, ssid)
+			if err != nil {
+				u.settingsMsg = err.Error()
+				u.core.Log.Warnf("home GPS refinement failed: %v", err)
+				return
+			}
+			cfg.HomeLat, cfg.HomeLon = lat, lon
+			cfg.HomeZip, cfg.HomePlace = "", ssid+" (GPS-refined)"
+			cfg.HomeAccuracyM, cfg.HomeSource = uncertaintyM, "GPS-refined from wardrive sightings"
+			if err := cfg.Save(); err != nil {
+				u.settingsMsg = "GPS found home but could not save it: " + err.Error()
+				return
+			}
+			u.homeLatEd.SetText(fmt.Sprintf("%.5f", lat))
+			u.homeLonEd.SetText(fmt.Sprintf("%.5f", lon))
+			u.settingsMsg = fmt.Sprintf("Home GPS-refined from %d combined fixes of %q: %.5f, %.5f (about ±%.0f m). If you had already saved the 100x100-mile map around an older centre, save it again around this one.", fixes, ssid, lat, lon, uncertaintyM)
+			u.core.Log.Infof("home GPS-refined from %d fixes of %q -> %.5f, %.5f ±%.0f m", fixes, ssid, lat, lon, uncertaintyM)
+		}()
+	}
+	if u.btnReadiness.Clicked(gtx) {
+		u.settingsMsg = "Writing the field readiness report..."
+		go func() {
+			path, err := WriteReadinessReport(u.core)
+			if err != nil {
+				u.settingsMsg = "Readiness report failed: " + err.Error()
+				u.core.Log.Warnf("readiness report failed: %v", err)
+				return
+			}
+			u.settingsMsg = "Field readiness report saved: " + path + " - it is the one file to hand back when something looks wrong (no token or passwords inside)."
+		}()
 	}
 	if u.btnSaveArea.Clicked(gtx) {
 		if cfg.HomeLat == 0 && cfg.HomeLon == 0 {
@@ -727,10 +851,19 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 	if u.showToken.Value {
 		tokenShown = cfg.Token
 	}
-	ips := localLANIPs()
+	var devIPs []string
+	if u.core.Disco != nil {
+		for _, fd := range u.core.Disco.Found() {
+			devIPs = append(devIPs, fd.IP)
+		}
+	}
+	ips := rankedLANIPs(devIPs)
+	if strings.TrimSpace(u.hostEd.Text()) == "" {
+		u.hostEd.SetText(preferredLANIPFor(devIPs))
+	}
 	ipNote := "No private LAN address found - type this computer's home-network IP manually."
 	if len(ips) > 0 {
-		ipNote = "This computer's address(es): " + strings.Join(ips, ", ") + " - the first is filled in. Devices must be on the same home network."
+		ipNote = "This computer's address(es): " + strings.Join(ips, ", ") + ". The filled-in one is on your Cardputers' network when they have been found; the address must match the network your devices are on (same first three numbers as the device IP)."
 	}
 
 	form := []layout.FlexChild{
@@ -746,6 +879,19 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(hSpace(10)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return u.btn(&u.btnApplyPort, "Apply + restart listener").Layout(gtx)
+				}),
+			)
+		}),
+		sectionTitle(u, "Dashboard window"),
+		caption(u, "With the tray on, closing the window tucks Aegis Companion into the system tray instead of quitting - the device link, live data and update checks keep running in the background. Right-click the tray icon to reopen the dashboard or quit for real."),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return material.Switch(u.th, &u.trayChk, "Tray").Layout(gtx)
+				}),
+				layout.Rigid(hSpace(6)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(12.5, colText, "Minimize to system tray when the window closes").Layout(gtx)
 				}),
 			)
 		}),
@@ -827,6 +973,27 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 		caption(u, "The shortcut points at this very program file - keep the folder where it is afterwards. Library: "+cfg.Library),
+		sectionTitle(u, "Publish firmware to GitHub"),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.btn(&u.btnPublishFw, "Publish staged PHOENIX to GitHub").Layout(gtx)
+				}),
+			)
+		}),
+		caption(u, "Uploads the staged, SHA-verified PHOENIX image + a fresh phoenix-latest.json onto this repo's latest release, using your own GitHub CLI login (gh auth login). The app never sees your token. After publishing, Cardputers can pull the update and this PC's Dashboard will offer to push it."),
+		sectionTitle(u, "Home presence (this PC's Wi-Fi radio)"),
+		caption(u, "Your home Wi-Fi name (SSID) - motion ripple of its signal = movement in the house:"),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.field(&u.homeSSIDEd, "e.g. Duffwifi")(gtx)
+		}),
+		caption(u, "Who's-home devices, one per line as Name=MAC (find a phone's MAC in its Wi-Fi settings; your Cardputers appear automatically):"),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.field(&u.homeDevEd, "Dad phone=AA:BB:CC:DD:EE:FF")(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.btn(&u.btnSavePresence, "Save presence settings").Layout(gtx)
+		}),
 		sectionTitle(u, "Updates & removal"),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
@@ -840,6 +1007,46 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(hSpace(10)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return u.btnGhost(&u.btnUninstall, "Uninstall AEGIS Companion...").Layout(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			st := updateSnapshot()
+			if !st.busy {
+				return layout.Dimensions{}
+			}
+			// Progress (v1.7.9): determinate while the installer
+			// downloads (st.pct), a sweeping pulse while checking -
+			// either way the click visibly DID something.
+			frac := float32(st.pct) / 100
+			if st.pct < 0 {
+				frac = float32(time.Now().UnixMilli()%1600) / 1600
+			}
+			label := st.msg
+			if label == "" {
+				label = "Working..."
+			}
+			if st.pct >= 0 {
+				label += "  (" + strconv.Itoa(st.pct) + "%)"
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					w := gtx.Constraints.Max.X
+					if w <= 0 {
+						w = gtx.Dp(480)
+					}
+					h := gtx.Dp(8)
+					fillRect(gtx, image.Rect(0, 0, w, h), colPanel2)
+					fw := int(float32(w) * frac)
+					if fw > 0 {
+						fillRect(gtx, image.Rect(0, 0, fw, h), colCyan)
+					}
+					return layout.Dimensions{Size: image.Pt(w, h)}
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(11.5, colCyan, label).Layout(gtx)
 				}),
 			)
 		}),
@@ -1103,6 +1310,35 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
 		caption(u, "Saved home map: set your home location, then save a 100x100-mile square of street map around it (zoom levels 10-14, one polite download, roughly 150 MB). Wardrives inside that square then draw their real street map straight from disk - no internet, no web call - and your drives stay easy to browse offline. Saving resumes if stopped, and re-running fills any gaps."),
+		caption(u, "Home location: type a US ZIP code (one internet lookup, then it is saved as coordinates) OR type latitude/longitude directly - whichever you prefer."),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(12, colDim, "Home ZIP code:").Layout(gtx)
+				}),
+				layout.Rigid(hSpace(8)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					gtx.Constraints.Min.X = gtx.Dp(90)
+					gtx.Constraints.Max.X = gtx.Dp(90)
+					return u.field(&u.homeZipEd, "06360")(gtx)
+				}),
+				layout.Rigid(hSpace(12)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.btn(&u.btnSaveZip, "Set home from ZIP").Layout(gtx)
+				}),
+				layout.Rigid(hSpace(12)),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					if cfg.HomePlace != "" {
+						return u.label(12, colDim, "Currently: "+cfg.HomePlace).Layout(gtx)
+					}
+					if cfg.HomeSource != "" && cfg.HomeAccuracyM > 0 {
+						return u.label(12, colDim, fmt.Sprintf("Currently: %s (±%.0f m)", cfg.HomeSource, cfg.HomeAccuracyM)).Layout(gtx)
+					}
+					return layout.Dimensions{}
+				}),
+			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1127,6 +1363,18 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(hSpace(12)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return u.btn(&u.btnSaveHome, "Save home location").Layout(gtx)
+				}),
+			)
+		}),
+		caption(u, "Accuracy, best to roughest: (1) GPS-refined - wardrive around the property from several spots with a clear GPS lock, sync, then refine below; (2) typed coordinates from an exact dropped pin; (3) ZIP centre - area-level and possibly kilometres away. Connecting/wardriving from multiple sides of a network improves its pin because scattered GPS errors and one-off spikes get out-voted."),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.btnGhost(&u.btnRefineHome, "Refine home from GPS sightings").Layout(gtx)
+				}),
+				layout.Rigid(hSpace(10)),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					return u.label(11.5, colDim, "Uses the home Wi-Fi name from the Presence section and at least 3 GPS-tagged sightings in the Library.").Layout(gtx)
 				}),
 			)
 		}),
@@ -1178,6 +1426,10 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		}),
 		sectionTitle(u, "About"),
 		caption(u, "AEGIS Companion "+appVersion+" · protocol AEGIS/1 · Cardputers stay lean collectors; this program verifies, files and explains. TALON is never linked, by design. Nothing here phones home."),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.btnGhost(&u.btnReadiness, "Save field readiness report").Layout(gtx)
+		}),
+		caption(u, "One plain-English snapshot for the hand-back file: link health, devices, staged firmware, presence, home-location source and every map pin's ± uncertainty. Secrets are deliberately left out."),
 	}
 	if u.settingsMsg != "" {
 		form = append(form,

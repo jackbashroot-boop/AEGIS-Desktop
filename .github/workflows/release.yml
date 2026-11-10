@@ -1,0 +1,73 @@
+# AEGIS auto-release: pushing a tag like v1.2.13 builds everything
+# and publishes the GitHub Release - nobody has to hand-upload files.
+#
+#   git tag v1.2.13
+#   git push origin v1.2.13
+#
+# Assets published (names are load-bearing - the Companion's update
+# feed reads them):
+#   Aegis-Suite-Setup-Linux / Aegis-Suite-Setup-Windows.exe
+#   aegis-phoenix-adv.bin / phoenix-latest.json / latest.json
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: GUI build libraries (Companion is a Gio app)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libegl1-mesa-dev libgles2-mesa-dev libx11-dev \
+            libx11-xcb-dev libxcursor-dev libxfixes-dev libxinerama-dev \
+            libxrandr-dev libxi-dev libvulkan-dev pkg-config
+
+      - name: Companion tests
+        working-directory: aegis-desktop/app
+        run: go test ./...
+
+      - name: Build Companion (Linux + Windows)
+        working-directory: aegis-desktop/app
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go build -o "$GITHUB_WORKSPACE/release-assets/AegisCompanion" .
+          GOOS=windows GOARCH=amd64 go build -o "$GITHUB_WORKSPACE/release-assets/AegisCompanion.exe" .
+        # NOTE: the Windows Gio build on a Linux runner is best-effort;
+        # if this step fails, the release still ships from the Linux
+        # path only - see ci/release_build.py notes.
+
+      - name: Build PHOENIX firmware
+        working-directory: aegis-phoenix-firmware
+        run: |
+          pip install platformio
+          pio run -j 1
+          cp .pio/build/cardputer-adv/firmware.bin "$GITHUB_WORKSPACE/release-assets/aegis-phoenix-adv.bin"
+
+      - name: Assemble suite installers + feeds
+        run: python3 ci/release_build.py "${GITHUB_REF_NAME}"
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/Aegis-Suite-Setup-Linux
+            release-assets/Aegis-Suite-Setup-Windows.exe
+            release-assets/aegis-phoenix-adv.bin
+            release-assets/phoenix-latest.json
+            release-assets/latest.json
+          generate_release_notes: true

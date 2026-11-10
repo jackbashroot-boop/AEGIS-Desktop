@@ -13,14 +13,15 @@
 #include <SD.h>
 #include <SPI.h>
 #include <WiFi.h>
+#include <WiFiUdp.h>
 #include <Preferences.h>
 #include <math.h>
 #include <vector>
 #include "lora_hat.h"
 
 LoRaHatDriver loraHat;
-static const char* kVer = "0.1.2";
-static const char* kFw = "AEGIS LANTERN 0.1.2";
+static const char* kVer = "0.1.3";
+static const char* kFw = "AEGIS LANTERN 0.1.3";
 static M5Canvas cv(&M5Cardputer.Display);
 static const uint16_t C_BG = 0x0000, C_BAR = 0x2100, C_ACC = 0xFD20,
                       C_DIM = 0x8410, C_TXT = 0xFFFF, C_SEL = 0x2010,
@@ -135,6 +136,237 @@ static void hdr(const char* title) {
 }
 static void foot(const String& t) { line(125, t, C_DIM); }
 
+static String g_status = "boot";
+static void progressBar(int x, int y, int w, int pct, uint16_t col) {
+  if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+  cv.drawRect(x, y, w, 7, C_DIM);
+  if (pct > 0) cv.fillRect(x + 1, y + 1, (w - 2) * pct / 100, 5, col);
+  cv.setTextSize(1); cv.setTextColor(C_TXT, C_BG);
+  cv.setCursor(x + w + 4, y); cv.print(String(pct) + "%");
+}
+
+// ---------------------------------------------------------- desktop sync
+// (v0.1.3: same Companion link as SCRIBE - discovery + auto-sync.)
+// Push family logs to AEGIS COMPANION on the home LAN. Config:
+// /AEGIS_LINK/desktop.txt  (host=, port=, token=). Auth is HMAC-
+// SHA256 challenge-response; the token never crosses the wire.
+#include <mbedtls/md.h>
+#include <mbedtls/sha256.h>
+#include <mbedtls/base64.h>
+static String g_deskHost, g_deskToken;
+static int g_deskPort = 8791;
+static int g_syncPct = -1;
+static void loadDesktopCfg() {
+  File f = SD.open("/AEGIS_LINK/desktop.txt", FILE_READ);
+  if (!f) return;
+  while (f.available()) {
+    String ln = f.readStringUntil('\n'); ln.trim();
+    if (ln.startsWith("host=")) g_deskHost = ln.substring(5);
+    else if (ln.startsWith("port=")) g_deskPort = ln.substring(5).toInt();
+    else if (ln.startsWith("token=")) g_deskToken = ln.substring(6);
+  }
+  f.close();
+}
+static String hmacHex(const String& key, const String& msg) {
+  const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+  mbedtls_md_context_t ctx; mbedtls_md_init(&ctx);
+  if (mbedtls_md_setup(&ctx, info, 1) != 0) { mbedtls_md_free(&ctx); return ""; }
+  mbedtls_md_hmac_starts(&ctx, (const uint8_t*)key.c_str(), key.length());
+  mbedtls_md_hmac_update(&ctx, (const uint8_t*)msg.c_str(), msg.length());
+  uint8_t out[32]; mbedtls_md_hmac_finish(&ctx, out); mbedtls_md_free(&ctx);
+  char hex[65]; for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", out[i]);
+  return String(hex);
+}
+static String fileSha256(const char* path, uint32_t& sizeOut) {
+  File f = SD.open(path, FILE_READ);
+  if (!f) { sizeOut = 0; return ""; }
+  sizeOut = f.size();
+  mbedtls_sha256_context ctx; mbedtls_sha256_init(&ctx); mbedtls_sha256_starts(&ctx, 0);
+  uint8_t buf[1024]; size_t n;
+  while ((n = f.read(buf, sizeof(buf))) > 0) mbedtls_sha256_update(&ctx, buf, n);
+  uint8_t out[32]; mbedtls_sha256_finish(&ctx, out); mbedtls_sha256_free(&ctx);
+  f.close();
+  char hex[65]; for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", out[i]);
+  return String(hex);
+}
+static bool syncAbortWanted() {
+  M5Cardputer.update();
+  if (M5Cardputer.Keyboard.isChange() && M5Cardputer.Keyboard.isPressed()) {
+    auto ks = M5Cardputer.Keyboard.keysState();
+    for (char ch : ks.word) if (ch == '`') return true;
+  }
+  return false;
+}
+static void drawSyncProgress(const String& what) {
+  hdr("SYNC TO DESKTOP");
+  line(34, what, C_ACC);
+  if (g_syncPct >= 0) progressBar(4, 50, 170, g_syncPct, C_OK);
+  line(70, "ESC aborts - files are SHA-verified", C_DIM);
+  cv.pushSprite(0, 0);
+}
+static bool syncReadLine(WiFiClient& c, String& out) {
+  const uint32_t t0 = millis();
+  out = "";
+  while (millis() - t0 < 9000) {
+    while (c.available()) {
+      char ch = (char)c.read();
+      if (ch == '\n') { out.trim(); return out.length() > 0; }
+      if (out.length() < 4096) out += ch;
+    }
+    if (!c.connected() && !c.available()) break;
+    delay(5);
+  }
+  out.trim();
+  return out.length() > 0;
+}
+struct SyncFile { const char* path; const char* name; };
+static int runSync(const SyncFile* files, int nFiles, const char* prog);
+static void draw();
+
+// ------------------------------------------------- discovery + auto-sync
+// Finds AEGIS COMPANION on the LAN when the address in desktop.txt
+// stops working: broadcast a nonce, require an HMAC proof keyed by
+// the shared token, adopt the answering address, write it back.
+static bool g_autoSync = true;
+static uint32_t g_nextAutoSync = 0, g_lastDiscoverMs = 0;
+static void saveDesktopCfg() {
+  if (!g_sdOk) return;
+  if (!SD.exists("/AEGIS_LINK")) SD.mkdir("/AEGIS_LINK");
+  File f = SD.open("/AEGIS_LINK/desktop.txt", FILE_WRITE);
+  if (!f) return;
+  f.print("host=" + g_deskHost + "\nport=" + String(g_deskPort) + "\ntoken=" + g_deskToken + "\n");
+  f.close();
+}
+static bool discoverDesktop() {
+  if (!g_deskToken.length() || WiFi.status() != WL_CONNECTED) return false;
+  char nonce[33];
+  for (int i = 0; i < 4; i++) snprintf(nonce + i * 8, 9, "%08lx", (unsigned long)esp_random());
+  WiFiUDP udp;
+  if (!udp.begin(0)) return false;
+  const IPAddress bcast(255, 255, 255, 255);
+  udp.beginPacket(bcast, g_deskPort); udp.print("AEGIS_DISCOVER 1 " + String(nonce) + "\n"); udp.endPacket();
+  if (g_deskPort != 8791) { udp.beginPacket(bcast, 8791); udp.print("AEGIS_DISCOVER 1 " + String(nonce) + "\n"); udp.endPacket(); }
+  const uint32_t t0 = millis();
+  bool found = false;
+  while (millis() - t0 < 1500 && !found) {
+    const int sz = udp.parsePacket();
+    if (sz > 0) {
+      char buf[160]; const int n = udp.read(buf, sizeof(buf) - 1); buf[max(0, n)] = 0;
+      String r(buf);
+      if (r.startsWith("AEGIS_HERE 1 ")) {
+        const int sp = r.lastIndexOf(' ');
+        String macT = r.substring(sp + 1); macT.trim();
+        const int port = r.substring(11, sp).toInt();
+        if (port > 0 && macT == hmacHex(g_deskToken, "AEGIS_DISCOVER:" + String(nonce))) {
+          g_deskHost = udp.remoteIP().toString();
+          g_deskPort = port;
+          saveDesktopCfg();
+          found = true;
+        }
+      }
+    }
+    delay(10);
+  }
+  udp.stop();
+  return found;
+}
+static const SyncFile kSyncFiles[] = {
+  {"/AEGIS_LANTERN/track.csv", "lantern_track.csv"},
+  {"/AEGIS_LANTERN/waypoints.csv", "lantern_waypoints.csv"},
+};
+static bool syncFilesDirty() {
+  String wm;
+  File f = SD.open("/AEGIS_LANTERN/.autosync", FILE_READ);
+  if (f) { wm = f.readString(); f.close(); }
+  for (auto& sf : kSyncFiles) {
+    File x = SD.open(sf.path, FILE_READ);
+    const long sz = x ? (long)x.size() : -1;
+    if (x) x.close();
+    if (sz > 0 && wm.indexOf(String(sf.name) + "=" + String(sz) + "\n") < 0) return true;
+  }
+  return false;
+}
+static void writeSyncWatermark() {
+  File f = SD.open("/AEGIS_LANTERN/.autosync", FILE_WRITE);
+  if (!f) return;
+  for (auto& sf : kSyncFiles) {
+    File x = SD.open(sf.path, FILE_READ);
+    const long sz = x ? (long)x.size() : -1;
+    if (x) x.close();
+    if (sz > 0) f.print(String(sf.name) + "=" + String(sz) + "\n");
+  }
+  f.close();
+}
+static void autoSyncTick() {
+  if (!g_autoSync || g_syncPct >= 0 || !g_sdOk || WiFi.status() != WL_CONNECTED) return;
+  if ((int32_t)(millis() - g_nextAutoSync) < 0) return;
+  if (!syncFilesDirty()) { g_nextAutoSync = millis() + 60000; return; }
+  {  // no live link in this program: probe first
+    WiFiClient probe;
+    if (!g_deskHost.length() || !probe.connect(g_deskHost.c_str(), g_deskPort, 1200)) {
+      g_nextAutoSync = millis() + 180000;
+      return;
+    }
+    probe.stop();
+  }
+  const int stored = runSync(kSyncFiles, 2, "LANTERN");
+  if (stored >= 0) { writeSyncWatermark(); g_nextAutoSync = millis() + 900000; }
+  else g_nextAutoSync = millis() + 180000;
+  draw();
+}
+
+static int runSync(const SyncFile* files, int nFiles, const char* prog) {
+  if (!g_sdOk) { g_status = "sync: no SD"; return -1; }
+  loadDesktopCfg();
+  if (!g_deskHost.length() || !g_deskToken.length()) { g_status = "sync: no /AEGIS_LINK/desktop.txt"; return -1; }
+  if (WiFi.status() != WL_CONNECTED) { g_status = "sync: join home WiFi first"; return -1; }
+  WiFiClient c;
+  g_syncPct = 0; drawSyncProgress("connecting...");
+  if (!c.connect(g_deskHost.c_str(), g_deskPort, 5000)) { g_status = "sync: desktop unreachable"; g_syncPct = -1; return -1; }
+  String ln;
+  if (!syncReadLine(c, ln) || ln.indexOf("AEGIS/1") < 0) { g_status = "sync: bad hello"; c.stop(); g_syncPct = -1; return -1; }
+  int np = ln.indexOf("\"nonce\":\"");
+  String nonce = np >= 0 ? ln.substring(np + 9, ln.indexOf("\"", np + 9)) : "";
+  c.print("{\"auth\":\"" + hmacHex(g_deskToken, nonce) + "\",\"prog\":\"" + prog + "\",\"ver\":\"" + kVer + "\"}\n");
+  if (!syncReadLine(c, ln) || ln.indexOf("\"ok\": true") < 0 && ln.indexOf("\"ok\":true") < 0) {
+    g_status = "sync: auth rejected"; c.stop(); g_syncPct = -1; return -1;
+  }
+  uint32_t totalBytes = 0, sentBytes = 0;
+  for (int i = 0; i < nFiles; i++) { uint32_t sz; if (SD.exists(files[i].path)) { fileSha256(files[i].path, sz); totalBytes += sz; } }
+  int stored = 0;
+  for (int i = 0; i < nFiles; i++) {
+    if (!SD.exists(files[i].path)) continue;
+    if (syncAbortWanted()) { g_status = "sync aborted"; c.stop(); g_syncPct = -1; return -1; }
+    uint32_t sz; const String sha = fileSha256(files[i].path, sz);
+    c.print("{\"file\":\"" + String(files[i].name) + "\",\"size\":" + String(sz) + ",\"sha256\":\"" + sha + "\"}\n");
+    if (!syncReadLine(c, ln) || ln.indexOf("\"send\": true") < 0 && ln.indexOf("\"send\":true") < 0) continue;
+    File f = SD.open(files[i].path, FILE_READ);
+    uint8_t buf[3072]; size_t n;
+    bool aborted = false;
+    while ((n = f.read(buf, sizeof(buf))) > 0) {
+      uint8_t b64[4200]; size_t olen = 0;
+      mbedtls_base64_encode(b64, sizeof(b64), &olen, buf, n);
+      b64[olen] = 0;
+      c.print("{\"data\":\"" + String((const char*)b64) + "\"}\n");
+      sentBytes += n;
+      g_syncPct = totalBytes ? (int)(sentBytes * 100 / totalBytes) : 100;
+      drawSyncProgress(String("sending ") + files[i].name);
+      if (syncAbortWanted()) { aborted = true; break; }
+    }
+    f.close();
+    if (aborted) { g_status = "sync aborted"; c.stop(); g_syncPct = -1; return -1; }
+    c.print("{\"eof\":true}\n");
+    if (syncReadLine(c, ln) && ln.indexOf("\"stored\": true") >= 0 || ln.indexOf("\"stored\":true") >= 0) stored++;
+  }
+  c.print("{\"done\":true}\n");
+  syncReadLine(c, ln);
+  c.stop();
+  g_syncPct = -1;
+  g_status = "synced " + String(stored) + " file(s) to desktop";
+  return stored;
+}
+
+
 // ------------------------------------------------------------ GNSS/nav
 static bool g_fix = false; static int g_sats = 0;
 static double g_lat = 0, g_lon = 0;
@@ -143,7 +375,6 @@ struct Waypoint { String name; double lat, lon; };
 static std::vector<Waypoint> g_wps;
 static int g_wpSel = 0, g_target = -1;
 static int g_trackCount = 0;
-static String g_status = "boot";
 
 static double nmeaToDeg(const String& v, const String& hemi) {
   if (!v.length()) return 0;
@@ -376,7 +607,7 @@ void setup() {
   loadHomeProfile();
   SPI.begin(40, 39, 14);
   g_sdOk = SD.begin(12);
-  if (g_sdOk) loadWaypoints();
+  if (g_sdOk) { loadWaypoints(); loadDesktopCfg(); }
   Serial2.begin(115200, SERIAL_8N1, 15, 13);
   loraHat.begin();
   draw();
@@ -391,6 +622,7 @@ void loop() {
     onKey(word, ks.enter, ks.del, ks.tab, ks.fn);
   }
   homeJoinTick(false);
+  autoSyncTick();
   loraHat.poll(onLoraPacket);
   while (Serial2.available()) {
     String s = Serial2.readStringUntil('\n'); s.trim();

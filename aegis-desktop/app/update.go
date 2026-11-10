@@ -54,10 +54,36 @@ type updateLatest struct {
 	FileWindows   string `json:"file_windows"`
 	SHA256Linux   string `json:"sha256_linux"`
 	SHA256Windows string `json:"sha256_windows"`
+	// Files is the nested per-OS shape our own release generator
+	// emits: {"files":{"linux":{"name","sha256","size"},...}}.
+	// (Before v1.7.9 the parser only knew the flat fields above,
+	// so a check could SAY an update existed while Install always
+	// failed with "names no installer file" - found in the audit.)
+	Files map[string]struct {
+		Name   string `json:"name"`
+		SHA256 string `json:"sha256"`
+		Size   int64  `json:"size"`
+	} `json:"files"`
+}
+
+func (l updateLatest) osEntry() (name, sha string, size int64, ok bool) {
+	if l.Files != nil {
+		key := "linux"
+		if runtime.GOOS == "windows" {
+			key = "windows"
+		}
+		if e, hit := l.Files[key]; hit && e.Name != "" {
+			return e.Name, e.SHA256, e.Size, true
+		}
+	}
+	return "", "", 0, false
 }
 
 // effectiveFile is the installer file name for this OS.
 func (l updateLatest) effectiveFile() string {
+	if n, _, _, ok := l.osEntry(); ok {
+		return n
+	}
 	if runtime.GOOS == "windows" && l.FileWindows != "" {
 		return l.FileWindows
 	}
@@ -69,6 +95,9 @@ func (l updateLatest) effectiveFile() string {
 
 // effectiveSHA256 is the expected installer hash for this OS.
 func (l updateLatest) effectiveSHA256() string {
+	if _, sha, _, ok := l.osEntry(); ok {
+		return sha
+	}
 	if runtime.GOOS == "windows" && l.SHA256Windows != "" {
 		return l.SHA256Windows
 	}
@@ -76,6 +105,12 @@ func (l updateLatest) effectiveSHA256() string {
 		return l.SHA256Linux
 	}
 	return l.SHA256
+}
+
+// effectiveSize is the expected installer size in bytes (0 = unknown).
+func (l updateLatest) effectiveSize() int64 {
+	_, _, size, _ := l.osEntry()
+	return size
 }
 
 func updatesDir() string { return filepath.Join(exeDir(), "Updates") }
@@ -170,7 +205,10 @@ func launchSuiteUninstaller() error {
 	if p == "" {
 		return fmt.Errorf("no suite uninstaller beside this program")
 	}
-	cmd := exec.Command(p, "--uninstall")
+	// --quiet is load-bearing (v1.7.8): without it the uninstaller
+	// ends in an interactive "Press Enter to close..." - and a GUI
+	// launch has no terminal, so it looked like nothing happened.
+	cmd := exec.Command(p, "--uninstall", "--quiet")
 	cmd.Dir = filepath.Dir(p)
 	return cmd.Start()
 }
@@ -194,6 +232,7 @@ type updateState struct {
 	mu         sync.Mutex
 	busy       bool
 	phase      string // "check" | "download" | ""
+	pct        int    // download percent 0-100, -1 = indeterminate
 	msg        string
 	latest     updateLatest
 	haveRemote bool   // a newer release is known at the feed
@@ -207,6 +246,7 @@ var gUpdate updateState
 type updateView struct {
 	busy       bool
 	phase      string
+	pct        int
 	msg        string
 	latest     updateLatest
 	haveRemote bool
@@ -217,7 +257,7 @@ type updateView struct {
 func updateSnapshot() updateView {
 	gUpdate.mu.Lock()
 	defer gUpdate.mu.Unlock()
-	return updateView{gUpdate.busy, gUpdate.phase, gUpdate.msg, gUpdate.latest,
+	return updateView{gUpdate.busy, gUpdate.phase, gUpdate.pct, gUpdate.msg, gUpdate.latest,
 		gUpdate.haveRemote, gUpdate.stagedPath, gUpdate.checked}
 }
 
@@ -313,7 +353,9 @@ func startUpdateCheck(cfg *Config) {
 	if updateSnapshot().busy {
 		return
 	}
-	gUpdate.set(func(st *updateState) { st.busy, st.phase, st.msg = true, "check", "Checking for updates..." })
+	gUpdate.set(func(st *updateState) {
+		st.busy, st.phase, st.pct, st.msg = true, "check", -1, "Checking for updates..."
+	})
 	go func() {
 		finish := func(msg string, fn func(*updateState)) {
 			gUpdate.set(func(st *updateState) {
@@ -343,6 +385,27 @@ func startUpdateCheck(cfg *Config) {
 		}
 		finish(msg, func(st *updateState) { st.latest, st.haveRemote = latest, true })
 	}()
+}
+
+// progWriter reports download progress into updateState.
+type progWriter struct {
+	w     io.Writer
+	n     int64
+	total int64
+	last  int
+}
+
+func (p *progWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	p.n += int64(n)
+	if p.total > 0 {
+		pct := int(p.n * 100 / p.total)
+		if pct != p.last {
+			p.last = pct
+			gUpdate.set(func(st *updateState) { st.pct = pct })
+		}
+	}
+	return n, err
 }
 
 // startUpdateDownload downloads the known-newer release installer
@@ -399,7 +462,18 @@ func startUpdateDownload(cfg *Config) {
 			return
 		}
 		h := sha256.New()
-		_, copyErr := io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, 300*1024*1024))
+		total := resp.ContentLength
+		if sz := latest.effectiveSize(); sz > 0 {
+			total = sz
+		}
+		if total > 0 {
+			gUpdate.set(func(st *updateState) { st.pct = 0 })
+		}
+		pw := &progWriter{w: io.MultiWriter(f, h), total: total, last: -1}
+		_, copyErr := io.Copy(pw, io.LimitReader(resp.Body, 300*1024*1024))
+		if total > 0 {
+			gUpdate.set(func(st *updateState) { st.pct = 100 })
+		}
 		closeErr := f.Close()
 		if copyErr != nil || closeErr != nil {
 			_ = os.Remove(tmp)

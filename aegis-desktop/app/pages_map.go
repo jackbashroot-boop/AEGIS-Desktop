@@ -272,7 +272,14 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 												return u.bold(12.5, rssiNRGBA(p.RSSI), fmt.Sprintf("%d dBm", p.RSSI)).Layout(gtx)
 											}),
 											layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-												return u.label(11, colDim, fmt.Sprintf("%.5f, %.5f", p.Lat, p.Lon)).Layout(gtx)
+												txt := fmt.Sprintf("%.5f, %.5f", p.Lat, p.Lon)
+												if p.UncertaintyM > 0 {
+													txt += fmt.Sprintf("  ±%.0f m · %d fix", p.UncertaintyM, p.Observations)
+													if p.Observations != 1 {
+														txt += "es"
+													}
+												}
+												return u.label(11, colDim, txt).Layout(gtx)
 											}),
 										)
 									}),

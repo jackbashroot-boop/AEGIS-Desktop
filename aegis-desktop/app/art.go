@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"gioui.org/layout"
+	"gioui.org/op"
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/unit"
@@ -158,6 +159,14 @@ func (u *UI) artBadge(gtx layout.Context, prog string, cell unit.Dp) layout.Dime
 	paint.FillShape(gtx.Ops, bg, clip.RRect{
 		Rect: image.Rectangle{Max: sz}, NW: r, NE: r, SE: r, SW: r,
 	}.Op(gtx.Ops))
+	if img := animImage(prog); img != nil {
+		in := side / 9
+		igt := gtx
+		igt.Constraints = layout.Exact(image.Pt(side-2*in, side-2*in))
+		defer op.Offset(image.Pt(in, in)).Push(gtx.Ops).Pop()
+		img.Layout(igt)
+		return layout.Dimensions{Size: sz}
+	}
 	_ = drawProgArt(gtx, prog, cell)
 	return layout.Dimensions{Size: sz}
 }

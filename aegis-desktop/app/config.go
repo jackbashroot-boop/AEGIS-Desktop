@@ -24,15 +24,22 @@ type Config struct {
 	// GitHubToken optionally authenticates feed/download requests
 	// when the repo is private. Entered locally in Settings; never
 	// leaves this machine except to api.github.com/github.com.
-	GitHubToken string  `json:"github_token,omitempty"`
-	HomeLat     float64 `json:"home_lat"` // centre of the saved offline map area
-	HomeLon     float64 `json:"home_lon"`
+	GitHubToken   string  `json:"github_token,omitempty"`
+	HomeLat       float64 `json:"home_lat"` // centre of the saved offline map area
+	HomeLon       float64 `json:"home_lon"`
+	HomeZip       string  `json:"home_zip,omitempty"`        // as typed by the user (v1.8.0)
+	HomePlace     string  `json:"home_place,omitempty"`      // resolved place name for display
+	HomeAccuracyM float64 `json:"home_accuracy_m,omitempty"` // estimated radius around HomeLat/HomeLon (v1.8.4)
+	HomeSource    string  `json:"home_source,omitempty"`     // ZIP / typed / GPS-refined (v1.8.4)
+	MinToTray     bool    `json:"min_to_tray,omitempty"`     // close = hide to system tray (v1.8.1)
+	HomeSSID      string  `json:"home_ssid,omitempty"`       // PC presence: your home Wi-Fi name (v1.8.3)
+	HomeDevices   string  `json:"home_devices,omitempty"`    // PC presence: "Name=MAC" lines (v1.8.3)
 }
 
 const (
 	defaultPort    = 8791
 	configFileName = "aegis-companion.json"
-	appVersion     = "1.7.7"
+	appVersion     = "1.8.4"
 )
 
 // exeDir is the folder the program lives in. Config, Library and logs sit
@@ -109,10 +116,19 @@ func (c *Config) desktopTxt(host string) string {
 	return fmt.Sprintf("host=%s\nport=%d\ntoken=%s\n", host, c.Port, c.Token)
 }
 
-// localLANIPs lists this machine's private IPv4 addresses, most likely
-// home-network address first, so Settings can prefill the desktop.txt host.
-func localLANIPs() []string {
-	var out []string
+// lanCandidate is one private IPv4 address on this machine.
+type lanCandidate struct {
+	ip    string
+	iface string
+}
+
+// lanCandidates enumerates private IPv4s with their interface names.
+// Multi-network PCs (wired + Wi-Fi + VPN + Docker bridges) routinely
+// have half a dozen; picking blindly wrote the WRONG subnet into
+// AEGIS_LINK/desktop.txt in the field (wired 192.168.x written while
+// the devices lived on Wi-Fi 10.x - v1.8.0 fix).
+func lanCandidates() []lanCandidate {
+	var out []lanCandidate
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		return out
@@ -134,23 +150,77 @@ func localLANIPs() []string {
 				ip = v.IP
 			}
 			ip4 := ip.To4()
-			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+			if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() || !ip4.IsPrivate() {
 				continue
 			}
-			if ip4.IsPrivate() {
-				out = append(out, ip4.String())
-			}
+			out = append(out, lanCandidate{ip: ip4.String(), iface: ifc.Name})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		// 192.168.x first - the overwhelmingly common home LAN.
-		return strings.HasPrefix(out[i], "192.168.") && !strings.HasPrefix(out[j], "192.168.")
-	})
 	return out
 }
 
+// scoreLAN ranks candidates: an address on the same /24 as a known
+// (found) device wins outright; Wi-Fi interfaces beat wired; virtual
+// bridges / VPN tunnels sink. Deterministic tie-break keeps the old
+// "first listed" behaviour for equal scores.
+func scoreLAN(c lanCandidate, deviceIPs []string) int {
+	score := 0
+	for _, d := range deviceIPs {
+		if same24(c.ip, d) {
+			score += 100
+		}
+	}
+	name := strings.ToLower(c.iface)
+	switch {
+	case strings.HasPrefix(name, "wlan"), strings.HasPrefix(name, "wlp"),
+		strings.Contains(name, "wi-fi"), strings.Contains(name, "wifi"),
+		strings.Contains(name, "wireless"):
+		score += 20
+	case strings.HasPrefix(name, "docker"), strings.HasPrefix(name, "br-"),
+		strings.HasPrefix(name, "veth"), strings.HasPrefix(name, "virbr"),
+		strings.Contains(name, "tailscale"), strings.HasPrefix(name, "tun"),
+		strings.HasPrefix(name, "wg"), strings.HasPrefix(name, "tap"):
+		score -= 50
+	}
+	return score
+}
+
+func same24(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	if len(pa) != 4 || len(pb) != 4 {
+		return false
+	}
+	return pa[0] == pb[0] && pa[1] == pb[1] && pa[2] == pb[2]
+}
+
+func rankedLANIPs(deviceIPs []string) []string {
+	cands := lanCandidates()
+	sort.SliceStable(cands, func(i, j int) bool {
+		return scoreLAN(cands[i], deviceIPs) > scoreLAN(cands[j], deviceIPs)
+	})
+	out := make([]string, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.ip)
+	}
+	return out
+}
+
+// localLANIPs lists this machine's private IPv4 addresses, most likely
+// home-network address first (ranked: device subnet, then Wi-Fi).
+func localLANIPs() []string { return rankedLANIPs(nil) }
+
 func preferredLANIP() string {
-	ips := localLANIPs()
+	ips := rankedLANIPs(nil)
+	if len(ips) == 0 {
+		return "127.0.0.1"
+	}
+	return ips[0]
+}
+
+// preferredLANIPFor picks the address devices should be told to reach:
+// the first ranked address sharing a subnet with any found device.
+func preferredLANIPFor(deviceIPs []string) string {
+	ips := rankedLANIPs(deviceIPs)
 	if len(ips) == 0 {
 		return "127.0.0.1"
 	}

@@ -53,6 +53,56 @@ type Server struct {
 	listener net.Listener
 	port     int
 	bg       sync.WaitGroup // in-flight report rebuilds; Stop drains them
+
+	// Live sessions, keyed by program name, so the Dashboard can
+	// send a firmware offer down an already-open link (v1.8.2).
+	sessMu   sync.Mutex
+	sessions map[string]*liveSession
+}
+
+// liveSession is one authenticated device connection. Writes from
+// outside the handler goroutine (firmware offers) take wmu so bytes
+// can never interleave with the handler's own replies.
+type liveSession struct {
+	conn net.Conn
+	wmu  sync.Mutex
+}
+
+func (s *Server) registerSession(prog string, sess *liveSession) {
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	if s.sessions == nil {
+		s.sessions = map[string]*liveSession{}
+	}
+	s.sessions[prog] = sess
+}
+
+func (s *Server) unregisterSession(prog string, sess *liveSession) {
+	s.sessMu.Lock()
+	defer s.sessMu.Unlock()
+	if s.sessions[prog] == sess {
+		delete(s.sessions, prog)
+	}
+}
+
+// SendFirmwareOffer tells a live-linked device that a verified newer
+// firmware image is waiting on this PC. The device prompts its user
+// (ENTER) and only then pulls the image with fw_get. Returns false
+// when the device has no live session right now.
+func (s *Server) SendFirmwareOffer(prog string, info fwFeedInfo) bool {
+	s.sessMu.Lock()
+	sess := s.sessions[prog]
+	s.sessMu.Unlock()
+	if sess == nil {
+		return false
+	}
+	sess.wmu.Lock()
+	defer sess.wmu.Unlock()
+	err := sendJSON(sess.conn, map[string]any{
+		"cmd": "fw_offer", "prog": prog, "ver": info.Version,
+		"size": info.Size, "sha256": info.SHA256,
+	})
+	return err == nil
 }
 
 func NewServer(cfg *Config, log *Log, live *LiveRegistry, store *Store) *Server {
@@ -249,6 +299,13 @@ func (s *Server) handle(conn net.Conn) {
 	if err := sendJSON(conn, map[string]any{"ok": true}); err != nil {
 		return
 	}
+	sess := &liveSession{conn: conn}
+	defer s.unregisterSession(prog, sess)
+	send := func(obj map[string]any) error {
+		sess.wmu.Lock()
+		defer sess.wmu.Unlock()
+		return sendJSON(conn, obj)
+	}
 	s.log.Infof("auth ok: %s %s from %s", prog, ver, remote)
 
 	day := time.Now().Format("2006-01-02")
@@ -278,15 +335,38 @@ func (s *Server) handle(conn net.Conn) {
 			_ = sendJSON(conn, map[string]any{"bye": true, "files": stored})
 			break
 		}
+		if msgBool(msg, "fw_get") {
+			// Device accepted a firmware offer and is pulling the
+			// image over this LAN connection (v1.8.2): one JSON
+			// header line, then the raw verified bytes.
+			info, binPath, ok := stagedFw(s.cfg)
+			if !ok {
+				_ = send(map[string]any{"fw_begin": false, "err": "no firmware staged on this PC"})
+				continue
+			}
+			if err := send(map[string]any{"fw_begin": true, "ver": info.Version, "size": info.Size, "sha256": info.SHA256}); err != nil {
+				return
+			}
+			f, err := os.Open(binPath)
+			if err != nil {
+				return
+			}
+			n, copyErr := io.Copy(conn, f)
+			f.Close()
+			s.log.Infof("firmware: sent PHOENIX %s (%d bytes) to %s over the LAN (err=%v)", info.Version, n, prog, copyErr)
+			return
+		}
 		if msgBool(msg, "live_start") {
 			liveMode = true
-			_ = sendJSON(conn, map[string]any{"live_ok": true})
+			s.registerSession(prog, sess)
+			_ = send(map[string]any{"live_ok": true})
 			s.log.Infof("live link open: %s %s - dashboard is watching", prog, ver)
 			continue
 		}
 		if msgString(msg, "type") == "live" {
 			if !liveMode {
 				liveMode = true
+				s.registerSession(prog, sess)
 				s.log.Infof("live link open: %s %s - dashboard is watching", prog, ver)
 			}
 			f := frameFromMsg(msg, prog, ver)
@@ -425,6 +505,15 @@ func frameFromMsg(msg map[string]any, prog, ver string) Frame {
 	}
 	if v, ok := msgInt(msg, "events"); ok {
 		f.Events, f.HasEvts = clampCount(v), true
+	}
+	if v, ok := msgInt(msg, "gps_acc"); ok && v > 0 {
+		if v > 1000 {
+			v = 1000
+		}
+		f.GPSAcc, f.HasGPS = int(v), true
+	}
+	if v, ok := msgInt(msg, "gps_rej"); ok {
+		f.GPSRej, f.HasGPSR = clampCount(v), true
 	}
 	f.Charging = msgBool(msg, "chg")
 	return f

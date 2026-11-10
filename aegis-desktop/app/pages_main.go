@@ -18,6 +18,19 @@ import (
 // middle, then recent reports + recent activity side by side.
 
 func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
+	// Updates panel buttons (v1.8.2): poll here, act before layout.
+	if u.btnFwCheck.Clicked(gtx) {
+		startUpdateCheck(u.core.Cfg)
+		startFwCheck(u.core.Cfg, u.core.Log)
+		u.toastGood("Checking: Companion feed + PHOENIX firmware feed...", 4)
+	}
+	if u.btnFwFetch.Clicked(gtx) {
+		startFwDownload(u.core.Cfg, u.core.Log)
+		u.toastGood("Downloading the latest PHOENIX here (SHA-256 verified) - then Send update on the device card.", 6)
+	}
+	if u.btnSyncAll.Clicked(gtx) {
+		u.syncEverything()
+	}
 	files, findings, bad := u.core.Store.TodayStats()
 	devs := u.core.Live.Snapshot()
 	online := u.core.Live.OnlineCount()
@@ -183,6 +196,149 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.bold(14, colText, "Home presence - this PC's Wi-Fi radio").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			pv := presenceSnapshot()
+			return bgFill(gtx, colPanel, 10, pad(12, func(gtx layout.Context) layout.Dimensions {
+				rows := []layout.FlexChild{}
+				if u.core.Cfg.HomeSSID == "" {
+					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(12, colDim, "Off for now: type your home Wi-Fi name in Settings (Presence section) and this PC starts sensing. Your Cardputers already appear under who's-home.").Layout(gtx)
+					}))
+				} else {
+					state, scol := "HOME QUIET", colGreen
+					if pv.Motion {
+						state, scol = "MOTION AT HOME", colAmber
+					}
+					if !pv.Ready {
+						state, scol = "LEARNING THE QUIET...", colCyan
+					}
+					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return stateBadge(gtx, u, state, true)
+							}),
+							layout.Rigid(hSpace(10)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								txt := fmt.Sprintf("signal ripple %.0f (quiet baseline %.0f) - %d access points in earshot", pv.Score, pv.Calm, pv.APs)
+								if pv.LastErr != "" {
+									txt = "scan problem: " + pv.LastErr
+								}
+								return u.label(12, colDim, txt).Layout(gtx)
+							}),
+							layout.Rigid(hSpace(12)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								pts := make([]float32, len(pv.Points))
+								for i, pt := range pv.Points {
+									pts[i] = float32(pt.Score)
+								}
+								if len(pts) >= 2 {
+									return spark(gtx, 150, 26, pts, scol)
+								}
+								return layout.Dimensions{}
+							}),
+						)
+					}))
+					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }))
+				}
+				if len(pv.People) > 0 {
+					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(12, colDim, "Who's home:").Layout(gtx)
+					}))
+					for _, person := range pv.People {
+						person := person
+						rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							st, c := "away", colFaint
+							if person.Home {
+								st, c = "home ("+person.Via+")", colGreen
+							}
+							return u.label(12, c, "  "+person.Name+" - "+st).Layout(gtx)
+						}))
+					}
+				} else if u.core.Cfg.HomeSSID != "" {
+					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(12, colDim, "Who's home: name your phone/TV in Settings (Name=MAC lines); your Cardputers show up by themselves.").Layout(gtx)
+					}))
+				}
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
+			}))
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.bold(14, colText, "Updates - Companion + devices in sync").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			uv := updateSnapshot()
+			fw := fwSnapshot()
+			compLine := "Companion " + appVersion + " (this PC)"
+			switch {
+			case uv.haveRemote:
+				compLine += " -> " + uv.latest.Version + " available"
+			case uv.checked:
+				compLine += " - up to date"
+			default:
+				compLine += " - not checked yet"
+			}
+			if uv.busy {
+				compLine += " (" + uv.msg + ")"
+			}
+			fwLine := "PHOENIX firmware: "
+			switch {
+			case fw.FeedVer != "" && fw.StagedVer == fw.FeedVer:
+				fwLine += fw.FeedVer + " downloaded here, verified, ready to offer"
+			case fw.FeedVer != "":
+				fwLine += "latest " + fw.FeedVer + " on the feed"
+				if fw.StagedVer != "" {
+					fwLine += " (this PC has " + fw.StagedVer + " ready)"
+				}
+			case fw.StagedVer != "":
+				fwLine += fw.StagedVer + " downloaded here"
+			default:
+				fwLine += "not checked yet"
+			}
+			if fw.Msg != "" {
+				fwLine += " - " + fw.Msg
+			}
+			if fw.Busy && fw.Pct >= 0 {
+				fwLine += fmt.Sprintf(" (%d%%)", fw.Pct)
+			}
+			return bgFill(gtx, colPanel, 10, pad(12, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(12.5, colText, compLine).Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(12.5, colText, fwLine).Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 8) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btn(&u.btnFwCheck, "Check for updates").Layout(gtx)
+							}),
+							layout.Rigid(hSpace(10)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btnGhost(&u.btnFwFetch, "Get latest PHOENIX").Layout(gtx)
+							}),
+							layout.Rigid(hSpace(10)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btn(&u.btnSyncAll, "Update everything").Layout(gtx)
+							}),
+						)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(11.5, colDim, "Update everything: this PC downloads and SHA-256-verifies the newest PHOENIX, then offers it to each live Cardputer - it only flashes after ENTER is pressed on the device itself. The Companion's own update still finishes in Settings (it restarts the app).").Layout(gtx)
+					}),
+				)
+			}))
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.bold(14, colText, "Link health - checked automatically").Layout(gtx)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
@@ -221,6 +377,52 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 				}
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
 			}))
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
+		// found on the network (active ping, v1.7.9)
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.bold(13, colText, "On your network right now (this PC pings every 15 s)").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			found := u.core.Disco.Found()
+			if len(found) == 0 {
+				return u.label(11.5, colDim, "None yet. A Cardputer appears here when it is on your Wi-Fi with the SD link file inserted (PHOENIX 0.12.2+ names itself by answering the ping; the others appear when they come looking for this PC). Finding is not linking - you still approve on the device.").Layout(gtx)
+			}
+			rows := make([]layout.FlexChild, 0, len(found))
+			for _, fd := range found {
+				fd := fd
+				rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					name, detail, col := fd.Prog, "", colCyan
+					if name == "" {
+						name = "AEGIS device"
+						detail = fd.IP + " - it is looking for this computer; watch its screen"
+					} else if _, live := u.core.Live.Get(fd.Prog); live {
+						detail = fd.IP + " - LIVE NOW"
+						col = colGreen
+					} else {
+						detail = fd.IP + " - fw " + fd.Ver + " - on the device, press ENTER to approve the link"
+					}
+					age := time.Since(fd.LastSeen).Round(time.Second)
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							if fd.Prog == "" {
+								return u.artBadge(gtx, "COMPANION", 1.1) // unnamed yet: neutral tile
+							}
+							return u.artBadge(gtx, fd.Prog, 1.1)
+						}),
+						layout.Rigid(hSpace(10)),
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return u.bold(12, colText, name).Layout(gtx)
+						}),
+						layout.Rigid(hSpace(8)),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return u.label(11.5, col, detail+" · seen "+age.String()+" ago").Layout(gtx)
+						}),
+					)
+				}))
+			}
+			return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
 		// recent reports + activity
@@ -385,6 +587,40 @@ func (u *UI) liveCardBody(gtx layout.Context, d DeviceLive, online bool, accent 
 			)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 8) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			fw := fwSnapshot()
+			fwTxt := "firmware " + d.Ver
+			if d.Ver == "" {
+				fwTxt = "firmware ?"
+			}
+			if fw.StagedVer != "" {
+				fwTxt += "  ·  this PC has " + fw.StagedVer + " verified"
+			}
+			canOffer := d.Prog == "PHOENIX" && fw.StagedVer != "" && d.Ver != "" && fwNewer(fw.StagedVer, d.Ver)
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(11.5, colDim, fwTxt).Layout(gtx)
+				}),
+				layout.Rigid(hSpace(10)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if canOffer && online {
+						click := u.fwRows.get("fwupd:" + d.Prog)
+						if click.Clicked(gtx) {
+							u.offerFirmware(d.Prog)
+						}
+						return u.btn(click, "Send update").Layout(gtx)
+					}
+					if canOffer {
+						return u.label(11, colAmber, "newer firmware ready - device offline").Layout(gtx)
+					}
+					if d.Prog == "PHOENIX" && fw.StagedVer != "" && d.Ver != "" && !fwNewer(fw.StagedVer, d.Ver) {
+						return u.label(11, colGreen, "firmware current").Layout(gtx)
+					}
+					return layout.Dimensions{}
+				}),
+			)
+		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -400,6 +636,17 @@ func (u *UI) liveCardBody(gtx layout.Context, d DeviceLive, online bool, accent 
 						ap = fmt.Sprint(d.APs)
 					}
 					return u.label(12, colDim, "APs in view: "+ap).Layout(gtx)
+				}),
+				layout.Rigid(hSpace(16)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					if d.HasGPSAcc {
+						txt := fmt.Sprintf("GPS ±%d m", d.GPSAcc)
+						if d.HasGPSRej && d.GPSRej > 0 {
+							txt += fmt.Sprintf(" · %d jump(s) rejected", d.GPSRej)
+						}
+						return u.label(12, colGreen, txt).Layout(gtx)
+					}
+					return layout.Dimensions{}
 				}),
 				layout.Rigid(hSpace(16)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -552,6 +799,16 @@ func (u *UI) liveDetail(gtx layout.Context, d DeviceLive) layout.Dimensions {
 					kv("events logged", fmt.Sprint(d.Events)),
 					kv("last event kind", lastEvt),
 					kv("frames received", fmt.Sprint(d.Frames)),
+					kv("GPS estimate", func() string {
+						if !d.HasGPSAcc {
+							return "not reported"
+						}
+						txt := fmt.Sprintf("±%d m", d.GPSAcc)
+						if d.HasGPSRej {
+							txt += fmt.Sprintf(" · %d jump(s) rejected", d.GPSRej)
+						}
+						return txt
+					}()),
 					kv("link", map[bool]string{true: "online", false: "offline (silent >12 s)"}[online]),
 				)
 			}),

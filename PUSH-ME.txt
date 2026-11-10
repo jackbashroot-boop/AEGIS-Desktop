@@ -1,42 +1,46 @@
 ====================================================================
-  UPDATE THE REPO + PUBLISH THE RELEASE - CachyOS / fish
-  Target: https://github.com/jackbashroot-boop/AEGIS-Desktop.git
+  AEGIS v1.2.14 - PUSH SOURCES + PUBLISH RELEASE (CachyOS / fish)
+  Repo: https://github.com/jackbashroot-boop/AEGIS-Desktop
 ====================================================================
 
-Your zips land in:  ~/Downloads/Red and Blue/Zip Files
-Run everything from there with the $DL shortcut below.
+Your downloads land in:  ~/Downloads/Red and Blue/Zip Files
+Type these (do NOT copy-paste long filenames from chat - they mangle).
 
 set DL $HOME/Downloads/"Red and Blue"/"Zip Files"
 
-1) Refresh sources + push (clones the repo first if needed):
-   test -d $HOME/aegis-repo/.git; or git clone https://github.com/jackbashroot-boop/AEGIS-Desktop.git $HOME/aegis-repo
-   unzip -o "$DL/aegis-repo-upload.zip" -d /tmp/aegis-new
-   cp -r /tmp/aegis-new/aegis-repo/. $HOME/aegis-repo/
-   cd $HOME/aegis-repo
-   git config user.name "jackbashroot-boop"
-   git config user.email "jackbashroot-boop@users.noreply.github.com"
-   git add -A
-   git commit -m "Suite v1.2.4 - PHOENIX v0.10.0 Wi-Fi self-update, Companion 1.7.5 vertical Settings (close/single-instance/uninstall fixes, repo updater, BENCH/LANTERN 0.1.3, HERALD 0.1.5)"
-   git push
+--- A) Push the source tree (one time per version) -------------------
+test -d $HOME/aegis-repo/.git; or git clone https://github.com/jackbashroot-boop/AEGIS-Desktop.git $HOME/aegis-repo
+unzip -o "$DL/aegis-repo-upload-v1.2.14.zip" -d /tmp/aegis-new
+cp -r /tmp/aegis-new/. $HOME/aegis-repo/
+cd $HOME/aegis-repo
+git config user.name "jackbashroot-boop"
+git config user.email "jackbashroot-boop@users.noreply.github.com"
+git add -A
+git status
+git commit -m "Suite 1.2.14 - Companion 1.8.4, PHOENIX 0.12.7: GPS location accuracy (multi-fix estimates, jump rejection, honest +/- radii), readiness report, triple brutal-test pass"
+git push
 
-   (The git config lines fix "Author identity unknown". They are
-   LOCAL to this repo - never share any password/token instead.)
+--- B) Publish the release the updater reads (5 files) ---------------
+cd $DL
+unzip -o Aegis-Release-v1.2.14-FILES.zip -d release-v1.2.14
+ls release-v1.2.14
+gh release create v1.2.14 release-v1.2.14/* -R jackbashroot-boop/AEGIS-Desktop --title "AEGIS Suite v1.2.14" --notes "Companion 1.8.4 + PHOENIX 0.12.7: location accuracy overhaul, field readiness report, brutal-test x3 verified."
 
-2) Publish the release the Companion updater reads:
-   unzip -o "$DL/Aegis-Release-v1.2.4-Assets.zip" -d "$DL/release-v1.2.4"
-   gh release create v1.2.4 "$DL"/release-v1.2.4/* --title "AEGIS Suite v1.2.4" --notes "PHOENIX Wi-Fi self-update; Settings stack; close/uninstall fixes."
-   gh release upload v1.2.1 "$DL/AEGIS-KEEP-ARCHIVE-v1.2.4.zip"   # optional restore-everything archive
+--- C) From NEXT release on, GitHub can build it for you -------------
+The repo now carries .github/workflows/release.yml + ci/release_build.py.
+After A) is pushed once:
+  git tag v1.2.15
+  git push origin v1.2.15
+GitHub Actions builds Companion + PHOENIX and publishes the Release.
+(First tag push is the workflow's real-world test - watch the Actions tab.
+The Companion's Settings > Publish staged PHOENIX button also still works
+for firmware-only drops onto the latest release, using your own gh login.)
 
-3) Visibility: Companion AND PHOENIX check releases/latest/download/
-   (latest.json / phoenix-latest.json) anonymously. PRIVATE repo =
-   404 = no updates for either. The repo must be PUBLIC for the
-   Cardputer to self-update (it carries no token, by design); the
-   Companion-only token option in Settings still exists as well.
-   The v1.2.4 release folder has FIVE files: both suite installers,
-   latest.json, phoenix-latest.json, aegis-phoenix-adv.bin. Future
-   PHOENIX-only updates: bump phoenix-latest.json + swap the .bin
-   in a new release; devices pick it up on home Wi-Fi.
-
-4) Verify: reboot Companion - Dashboard health should show
-   "Updates ... checked against the repo", and Settings > Check
-   for updates should say you are up to date on v1.7.5.
+--- D) Verify ---------------------------------------------------------
+1. Companion: Dashboard > Update everything (it self-updates to 1.8.4).
+2. Cardputer on home Wi-Fi: accept the PHOENIX 0.12.7 offer with ENTER.
+3. PHOENIX SETUP shows "Firmware - PHOENIX v0.12.7"; CAP screen shows
+   Sats/HDOP/+/- metres when the GNSS cap has a fix.
+4. Companion Settings > About > Save field readiness report - hand that
+   file back if anything looks wrong. It contains no secrets.
+====================================================================
