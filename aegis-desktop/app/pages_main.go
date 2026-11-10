@@ -35,6 +35,30 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 	devs := u.core.Live.Snapshot()
 	online := u.core.Live.OnlineCount()
 
+	// Dashboard tabs (v1.8.8): Overview + one tab per program. The old
+	// standalone Live Monitor page folded into these tabs.
+	if u.dashTab != "" {
+		ok := false
+		for _, p := range familyOrder {
+			if p == u.dashTab {
+				ok = true
+			}
+		}
+		if !ok {
+			u.dashTab = ""
+		}
+	}
+	if u.dashTab != "" {
+		prog := u.dashTab
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(u.tabStrip),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 12) }),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				return u.pageProgram(gtx, prog)
+			}),
+		)
+	}
+
 	problemsCol := colCyan
 	if bad > 0 {
 		problemsCol = colRed
@@ -439,6 +463,11 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 				layout.Flexed(1, u.dashRecentActivity),
 			)
 		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
+		// other devices on the network (v1.8.8 census)
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.networkBox(gtx)
+		}),
 	}
 	const chunk = 2
 	nChunks := (len(children) + chunk - 1) / chunk
@@ -811,6 +840,15 @@ func (u *UI) liveDetail(gtx layout.Context, d DeviceLive) layout.Dimensions {
 							txt += fmt.Sprintf(" · %d jump(s) rejected", d.GPSRej)
 						}
 						return txt
+					}()),
+					kv("Wi-Fi sensing (CSI)", func() string {
+						if !d.HasCSI {
+							return "not reported (enable Presence sense on the device)"
+						}
+						if d.CSIMot {
+							return fmt.Sprintf("MOTION nearby · score %d/100", d.CSI)
+						}
+						return fmt.Sprintf("quiet · score %d/100", d.CSI)
 					}()),
 					kv("link", map[bool]string{true: "online", false: "offline (silent >12 s)"}[online]),
 				)

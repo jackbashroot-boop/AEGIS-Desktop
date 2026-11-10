@@ -96,6 +96,7 @@ const (
 	pgReports
 	pgLog
 	pgSettings
+	pgSystem
 )
 
 var pageTitles = map[pageID]string{
@@ -106,6 +107,7 @@ var pageTitles = map[pageID]string{
 	pgReports:  "Reports",
 	pgLog:      "Activity Log",
 	pgSettings: "Settings",
+	pgSystem:   "System",
 }
 
 type UI struct {
@@ -115,10 +117,19 @@ type UI struct {
 
 	navClicks map[pageID]*widget.Clickable
 
-	liveRows *clickSet
-	selProg  string
-	dashList widget.List
-	liveList widget.List
+	liveRows       *clickSet
+	selProg        string
+	dashList       widget.List
+	liveList       widget.List
+	tabList        widget.List
+	tabRows        *clickSet
+	dashTab        string // "" = Overview, else the program whose tab is open
+	btnTabLib      widget.Clickable
+	compactSet     bool
+	sysList        widget.List
+	btnBackupNow   widget.Clickable
+	btnUpdateLater widget.Clickable
+	updateLater    bool // user chose "Later" on the update prompt
 
 	mapList       widget.List
 	mapRows       *clickSet
@@ -245,15 +256,17 @@ func newUI(core *Core) *UI {
 	u := &UI{
 		core: core, th: th, page: pgDash,
 		navClicks: map[pageID]*widget.Clickable{},
-		liveRows:  newClickSet(), libDays: newClickSet(), libProgs: newClickSet(),
+		liveRows:  newClickSet(), tabRows: newClickSet(), libDays: newClickSet(), libProgs: newClickSet(),
 		fwRows:  newClickSet(),
 		mapRows: newClickSet(), famRows: newClickSet(), mapReal: true,
 		areaProg: newAreaProgress(),
 		repRows:  newClickSet(), repExpand: newClickSet(), expanded: map[string]bool{},
 	}
-	for _, p := range []pageID{pgDash, pgLive, pgMap, pgLibrary, pgReports, pgLog, pgSettings} {
+	for _, p := range []pageID{pgDash, pgLive, pgMap, pgLibrary, pgReports, pgLog, pgSettings, pgSystem} {
 		u.navClicks[p] = &widget.Clickable{}
 	}
+	u.sysList.List.Axis = layout.Vertical
+	u.tabList.List.Axis = layout.Horizontal
 	u.dashList.List.Axis = layout.Vertical
 	u.setList.List.Axis = layout.Vertical
 	u.liveList.List.Axis = layout.Vertical
@@ -324,6 +337,8 @@ func runGUI(core *Core) {
 	// latest.json; nothing downloads without a click.
 	startUpdateCheck(core.Cfg)
 	startPresence(core)
+	startNetCensus(core)
+	startSysInfo()
 	go func() {
 		for {
 			if !runWindowOnce(core, u, tm) {
@@ -675,6 +690,9 @@ func (u *UI) sidebar(gtx layout.Context) layout.Dimensions {
 				return layout.Dimensions{Size: gtx.Constraints.Min}
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Left: 14, Right: 14, Bottom: 10}.Layout(gtx, u.liveNowBox)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Left: 14, Right: 14, Bottom: 14}.Layout(gtx, u.listenerCard)
 			}),
 		)
@@ -687,8 +705,7 @@ func (u *UI) navList(gtx layout.Context) layout.Dimensions {
 		label string
 		badge func() string
 	}{
-		{pgDash, "Dashboard", nil},
-		{pgLive, "Live Monitor", func() string {
+		{pgDash, "Dashboard", func() string {
 			if n := u.core.Live.OnlineCount(); n > 0 {
 				return fmt.Sprint(n)
 			}
@@ -703,6 +720,7 @@ func (u *UI) navList(gtx layout.Context) layout.Dimensions {
 		{pgLibrary, "Library", nil},
 		{pgReports, "Reports", nil},
 		{pgLog, "Activity Log", nil},
+		{pgSystem, "System", nil},
 		{pgSettings, "Settings", nil},
 	}
 	widgets := make([]layout.FlexChild, 0, len(items))
@@ -801,8 +819,12 @@ func (u *UI) content(gtx layout.Context) layout.Dimensions {
 				switch u.page {
 				case pgDash:
 					return u.pageDashboard(gtx)
-				case pgLive:
-					return u.pageLive(gtx)
+				case pgLive: // legacy: Live folded into Dashboard tabs (v1.8.8)
+					u.page = pgDash
+					if u.selProg != "" {
+						u.dashTab = u.selProg
+					}
+					return u.pageDashboard(gtx)
 				case pgMap:
 					return u.pageMap(gtx)
 				case pgLibrary:
@@ -813,6 +835,8 @@ func (u *UI) content(gtx layout.Context) layout.Dimensions {
 					return u.pageLog(gtx)
 				case pgSettings:
 					return u.pageSettings(gtx)
+				case pgSystem:
+					return u.pageSystem(gtx)
 				}
 				return layout.Dimensions{}
 			})

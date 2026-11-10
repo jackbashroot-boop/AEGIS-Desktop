@@ -178,15 +178,14 @@ func (u *UI) gotoProgram(prog string) {
 	prog = strings.ToUpper(prog)
 	if _, ok := u.core.Live.Get(prog); ok {
 		u.selProg = prog
-		u.page = pgLive
+		u.dashTab = prog
+		u.page = pgDash
 		return
 	}
-	for _, dp := range u.core.Store.Summaries() {
-		if strings.EqualFold(dp.Prog, prog) {
-			u.libDay, u.libProg = dp.Day, dp.Prog
-			u.page = pgLibrary
-			return
-		}
-	}
-	u.page = pgReports
+	// Every program has a tab now (v1.8.8): live or not, clicking its
+	// art opens the tab - live detail when streaming, library history
+	// and plain-English status when not.
+	u.selProg = prog
+	u.dashTab = prog
+	u.page = pgDash
 }

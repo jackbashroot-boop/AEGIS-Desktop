@@ -36,8 +36,8 @@
 #include <time.h>
 
 #define AGENT_VERSION "aegis-0.8.3"
-#define FIRMWARE_VER "AEGIS-PHX-v0.12.9-ADV"
-#define FW_VER_NUM "0.12.9"
+#define FIRMWARE_VER "AEGIS-PHX-v0.12.12-ADV"
+#define FW_VER_NUM "0.12.12"
 
 // ---------------------------------------------------------- shared state
 static String g_wifiSsid = "";
@@ -253,6 +253,7 @@ static uint32_t lastHeartbeat = 0;
 
 // Rule engine + detectors + (optional) expansion drivers + SD vault.
 #include "board_config.h"
+#include "sensors.h"   // optional LD2410 mmWave + VL53L1X detect (v0.12.11)
 #include "rules.h"
 static RuleSet localRules;
 
@@ -1274,6 +1275,12 @@ static void liveTaskFn(void*) {
         n += snprintf(frame + n, sizeof(frame) - n, ",\"gps_acc\":%.0f,\"gps_rej\":%lu",
                       (double)gpsAcc, (unsigned long)gnssHat.rejectedJumps);
       }
+      if (n > 0 && n < (int)sizeof(frame) - 72) {
+        // Presence sensors (v0.12.11): only sent when hardware answered.
+        if (g_csiOn) n += snprintf(frame + n, sizeof(frame) - n, ",\"csi\":%d,\"csi_mot\":%d", g_csiScore, g_csiPresent ? 1 : 0);
+        if (g_ld2410.everSeen) n += snprintf(frame + n, sizeof(frame) - n, ",\"ld2410\":%d,\"ld_cm\":%d", g_ld2410.present ? 1 : 0, g_ld2410.moving ? (int)g_ld2410.moveCm : (int)g_ld2410.stillCm);
+        else if (g_tofPresent) n += snprintf(frame + n, sizeof(frame) - n, ",\"tof\":1");
+      }
       if (s.pct >= 0 && n > 0 && n < (int)sizeof(frame) - 24) n += snprintf(frame + n, sizeof(frame) - n, ",\"pct\":%d", s.pct);
       if (n > 0 && n < (int)sizeof(frame) - 2) { frame[n++] = '}'; frame[n++] = '\n'; frame[n] = 0; }
       if (c.print(frame) == 0) break;
@@ -1706,6 +1713,8 @@ static bool g_csiStarted = false;
 static float g_csiBase = 0;             // learned "calm room" variance
 static uint32_t g_csiLastTickMs = 0, g_csiLastEventMs = 0;
 static int g_csiHotSecs = 0;
+static float g_csiSmooth = 0;   // EMA of subcarrier spread (v0.12.11 hardening)
+static int g_csiCalmSecs = 0;   // consecutive below-exit-threshold seconds
 static bool csiBegin() {
   wifi_csi_config_t cfg = {};
   cfg.lltf_en = true; cfg.htltf_en = true; cfg.stbc_htltf2_en = true;
@@ -1737,13 +1746,19 @@ static void csiTick() {
   const float sd = sqrtf(var / 32.0f);
   if (g_csiBase < 1.0f) g_csiBase = sd > 1 ? sd : 20.0f;
   if (sd < g_csiBase * 1.6f) g_csiBase = g_csiBase * 0.95f + sd * 0.05f;   // learn only when calm
-  const float ratio = g_csiBase > 0 ? sd / g_csiBase : 1.0f;
+  // Hardened scoring (v0.12.11): judge the EMA-smoothed spread, not
+  // the raw 1 s sample; enter presence at >=45 sustained 2 s, leave
+  // only after 3 s below 30 (hysteresis) - real-time, no flicker.
+  if (g_csiSmooth < 1.0f) g_csiSmooth = sd; else g_csiSmooth = g_csiSmooth * 0.6f + sd * 0.4f;
+  const float ratio = g_csiBase > 0 ? g_csiSmooth / g_csiBase : 1.0f;
   int score = (int)((ratio - 1.0f) * 45.0f);
   g_csiScore = score < 0 ? 0 : (score > 100 ? 100 : score);
   const bool hot = g_csiScore >= 45 && g_csiPkts > 20;
   g_csiHotSecs = hot ? g_csiHotSecs + 1 : 0;
   const bool was = g_csiPresent;
-  g_csiPresent = g_csiHotSecs >= 2;
+  if (g_csiHotSecs >= 2) { g_csiPresent = true; g_csiCalmSecs = 0; }
+  else if (g_csiScore < 30) { if (++g_csiCalmSecs >= 3) g_csiPresent = false; }
+  else g_csiCalmSecs = 0;
   if (g_csiPresent && !was && now - g_csiLastEventMs > 300000) {
     g_csiLastEventMs = now;
     JsonDocument pd; JsonObject pf = pd.to<JsonObject>();
@@ -2258,6 +2273,20 @@ void loop() {
   loraBeaconTick();
   updateCheckTick();
   csiTick();
+  sensorsTick(g_c5HotSwapEnabled);
+  { // LD2410 presence edge -> same event stream as CSI (v0.12.11)
+    static bool s_ldWas = false;
+    static uint32_t s_ldEvtMs = 0;
+    const bool ldPres = g_ld2410.present && (g_ld2410.moving || g_ld2410.still);
+    if (ldPres && !s_ldWas && millis() - s_ldEvtMs > 300000) {
+      s_ldEvtMs = millis();
+      JsonDocument pd; JsonObject pf = pd.to<JsonObject>();
+      pf["ld2410.move_cm"] = g_ld2410.moveCm;
+      pf["ld2410.still_cm"] = g_ld2410.stillCm;
+      pushEvent("presence_motion", "mmwave", "ld2410", "Presence detected nearby (mmWave LD2410)", pf);
+    }
+    s_ldWas = ldPres;
+  }
   wifiJoinTick();
   linkPromptTick();
   fwJobTick();

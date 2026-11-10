@@ -51,7 +51,7 @@ static void drawPhoenix(LGFX_Sprite& d, int x, int y, int scale) {
   }
 }
 
-enum AegisView { VIEW_DASH = 0, VIEW_MODULES, VIEW_EVENTS, VIEW_CAP, VIEW_NET, VIEW_DIAG, VIEW_HELP, VIEW_SETUP, VIEW_REMOTE, VIEW_LOGS, VIEW_ATLAS, VIEW_RULES, VIEW_MENU, VIEW_BINDS };
+enum AegisView { VIEW_DASH = 0, VIEW_MODULES, VIEW_EVENTS, VIEW_CAP, VIEW_NET, VIEW_DIAG, VIEW_HELP, VIEW_SETUP, VIEW_REMOTE, VIEW_LOGS, VIEW_ATLAS, VIEW_RULES, VIEW_MENU, VIEW_BINDS, VIEW_ABOUT };
 static AegisView g_view = VIEW_DASH;
 static uint32_t g_lastUiDraw = 0;
 static uint32_t g_ghostIgnored = 0;
@@ -84,21 +84,16 @@ static const UnifiedItem kUnifiedMenu[] = {
   {"SCANS",   "LAN scan (live hosts)",    'n', -1},
   {"SCANS",   "LoRa channel sweep",       'r', -1},
   {"SCANS",   "Wardrive logging",         'w', -1},
-  {"SCANS",   "Background scans",         'B', -1},
-  {"SCANS",   "Passive offline mode",     'O', -1},
   {"DETECT",  "Events",                   0, VIEW_EVENTS},
   {"DETECT",  "Atlas / WiGLE map",        0, VIEW_ATLAS},
   {"DETECT",  "Export maps (Atlas)",      'M', -1},
   {"DETECT",  "Rules manager",            0, VIEW_RULES},
   {"DETECT",  "Reload rule packs",        'Y', -1},
   {"DETECT",  "Quarantine (mute radios)", 'Q', -1},
-  {"WIFI",    "WiFi status & check",      0, VIEW_SETUP},
   {"WIFI",    "Join saved WiFi now",      'i', -1},
-  {"WIFI",    "Home WiFi setup",          'H', -1},
   {"WIFI",    "Sniffer channel hop 1-13", 'J', -1},
   {"WIFI",    "Open WiFi (free info)",    'o', -1},
   {"WIFI",    "Presence sense (CSI)",     'e', -1},
-  {"WIFI",    "Firmware update (WiFi)",   'y', -1},
   {"DEVICES", "Devices & hats",           0, VIEW_MODULES},
   {"DEVICES", "LoRa / GNSS cap",          0, VIEW_CAP},
   {"DEVICES", "Shadow vault (AES-256)",   'U', -1},
@@ -107,14 +102,19 @@ static const UnifiedItem kUnifiedMenu[] = {
   {"DEVICES", "ESP32-C5 hot-swap",        'C', -1},
   {"DESKTOP", "Desktop live link",        'L', -1},
   {"DESKTOP", "Desktop auto-sync",        'D', -1},
+  {"SETTINGS","Settings & status",        0, VIEW_SETUP},
+  {"SETTINGS","Home WiFi setup",          'H', -1},
+  {"SETTINGS","Background scans",         'B', -1},
+  {"SETTINGS","Passive offline mode",     'O', -1},
+  {"SETTINGS","Brightness",               'G', -1},
+  {"SETTINGS","Screen sleep",             'Z', -1},
+  {"SETTINGS","Firmware update (WiFi)",   'y', -1},
+  {"SETTINGS","Key binds (custom)",       0, VIEW_BINDS},
   {"SYSTEM",  "Dashboard",                0, VIEW_DASH},
-  {"SYSTEM",  "Setup",                    0, VIEW_SETUP},
+  {"SYSTEM",  "About this device",        0, VIEW_ABOUT},
   {"SYSTEM",  "Full integrity sweep",     't', -1},
-  {"SYSTEM",  "Brightness",               'G', -1},
-  {"SYSTEM",  "Screen sleep",             'Z', -1},
   {"SYSTEM",  "Log viewer",               0, VIEW_LOGS},
   {"SYSTEM",  "Help",                     0, VIEW_HELP},
-  {"SYSTEM",  "Key binds (custom)",       0, VIEW_BINDS},
 };
 // Two-level menu (v0.12.3, user request): M opens the short GROUP list
 // (SCANS / DETECT / WIFI / DEVICES / DESKTOP / SYSTEM); ENTER opens one
@@ -970,6 +970,40 @@ static void drawCurrentView() {
       row("C5 hot-swap", !g_c5HotSwapEnabled ? "OFF (G1 free for IR RX)" :
           (esp32c5.active ? "ONLINE 5GHz active" : "ON - waiting on Grove"),
           esp32c5.active ? 0x07E0 : 0xFFE0);
+      row("Sensors", fitLine(ld2410Summary(), 25), g_ld2410.present ? 0xF800 : 0xFFFF);
+      break;
+    }
+    case VIEW_ABOUT: {
+      // Live About (v0.12.11): redraws with the normal UI cycle, so
+      // RAM/CPU/uptime/battery/sensors move in real time.
+      uiHeader("ABOUT THIS DEVICE");
+      int y = 24;
+      auto row = [&](const char* label, const String& val, uint16_t c = 0xFFFF) {
+        d.setTextSize(1); d.setTextColor(0x8410, 0x0000); d.setCursor(4, y); d.print(label);
+        d.setTextColor(c, 0x0000); d.setCursor(92, y); d.print(fitLine(val, 25)); y += 10;
+      };
+      const uint32_t up = millis() / 1000;
+      row("Firmware", "PHOENIX v" FW_VER_NUM, 0x07E0);
+      row("Board", String(ESP.getChipModel()) + " rev" + String(ESP.getChipRevision()));
+      row("CPU", String((unsigned)ESP.getCpuFreqMHz()) + " MHz, up " +
+          String((unsigned)(up / 3600)) + "h" + String((unsigned)((up / 60) % 60)) + "m");
+      row("RAM free", String((unsigned)ESP.getFreeHeap()) + " / " + String((unsigned)ESP.getHeapSize()) + " B",
+          ESP.getFreeHeap() < 30000 ? 0xFFE0 : 0x07E0);
+      row("PSRAM", ESP.getPsramSize() ? (String((unsigned)(ESP.getFreePsram() / 1024)) + " KB free") : String("none"));
+      row("Battery", g_batt.pct >= 0 ? (String(g_batt.pct) + "%" + (g_batt.charging ? " charging" : "")) : String("on USB"),
+          g_batt.pct >= 0 && g_batt.pct < 25 && !g_batt.charging ? 0xF800 : 0x07E0);
+      row("SD card", sdLogMgr.mounted ? (String((unsigned)(SD.cardSize() / (1024 * 1024))) + " MB mounted") : String("NO SD"),
+          sdLogMgr.mounted ? 0x07E0 : 0xF800);
+      row("WiFi", WiFi.status() == WL_CONNECTED ? (WiFi.SSID() + " " + WiFi.localIP().toString()) : String("not joined"),
+          WiFi.status() == WL_CONNECTED ? 0x07E0 : 0xFFE0);
+      row("WiFi MAC", WiFi.macAddress());
+      row("Mode", g_passiveOffline ? "PASSIVE OFFLINE" : "NORMAL", g_passiveOffline ? 0x07FF : 0x07E0);
+      row("Presence", g_csiOn ? ("CSI " + String(g_csiScore) + (g_csiPresent ? " MOTION" : " calm")) : "CSI off",
+          g_csiPresent ? 0xF800 : 0xFFFF);
+      row("mmWave", fitLine(ld2410Summary(), 25), g_ld2410.present ? 0xF800 : 0xFFFF);
+      row("ToF VL53L1X", g_tofPresent ? "detected on I2C 0x29" : "not detected", g_tofPresent ? 0x07E0 : 0xFFFF);
+      d.setTextSize(1); d.setTextColor(0x07FF, 0x0000); d.setCursor(4, 122);
+      d.print("AEGIS PHOENIX - own/authorized networks only");
       break;
     }
     case VIEW_REMOTE: {

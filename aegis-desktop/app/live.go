@@ -32,6 +32,9 @@ type DeviceLive struct {
 	HasAPs    bool
 	Pct       int // progress % of a long operation, -1 when none
 	Events    int
+	CSI       int // Wi-Fi CSI presence score (PHOENIX 0.12.12+)
+	HasCSI    bool
+	CSIMot    bool
 	GPSAcc    int // optional GNSS estimated accuracy, metres (PHOENIX 0.12.7+)
 	HasGPSAcc bool
 	GPSRej    int // optional count of rejected impossible GPS jumps
@@ -72,6 +75,9 @@ type Frame struct {
 	HasGPS   bool
 	GPSRej   int
 	HasGPSR  bool
+	CSI      int // Wi-Fi CSI presence score 0-100 (v1.8.9)
+	HasCSI   bool
+	CSIMot   bool // CSI says motion right now
 }
 
 func (r *LiveRegistry) Update(f Frame) {
@@ -113,6 +119,9 @@ func (r *LiveRegistry) Update(f Frame) {
 	}
 	if f.HasGPSR {
 		d.GPSRej, d.HasGPSRej = f.GPSRej, true
+	}
+	if f.HasCSI {
+		d.CSI, d.HasCSI, d.CSIMot = f.CSI, true, f.CSIMot
 	}
 	d.LastSeen = now
 	d.Frames++

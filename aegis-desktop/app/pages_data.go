@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"gioui.org/layout"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -57,14 +59,26 @@ func (u *UI) field(ed *widget.Editor, hint string) layout.Widget {
 
 func sectionTitle(u *UI, txt string) layout.FlexChild {
 	return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-		return layout.Inset{Top: 14, Bottom: 6}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return u.bold(13.5, colText, txt).Layout(gtx)
+		return layout.Inset{Top: 16, Bottom: 6}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					paint.FillShape(gtx.Ops, colCyan, clip.Rect{Max: image.Pt(gtx.Dp(3), gtx.Dp(14))}.Op())
+					return layout.Dimensions{Size: image.Pt(gtx.Dp(3), gtx.Dp(14))}
+				}),
+				layout.Rigid(hSpace(8)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.bold(13.5, colText, txt).Layout(gtx)
+				}),
+			)
 		})
 	})
 }
 
 func caption(u *UI, txt string) layout.FlexChild {
 	return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		if u.compactSet { // streamlined Settings (v1.8.8): prose hidden
+			return layout.Dimensions{}
+		}
 		return u.label(11.5, colDim, txt).Layout(gtx)
 	})
 }
@@ -585,6 +599,11 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		startUpdateCheck(cfg)
 		u.core.Log.Infof("update check started (local Updates folder + feed %s)", cfg.UpdateFeed)
 	}
+	if u.btnUpdateLater.Clicked(gtx) {
+		u.updateLater = true
+		u.settingsMsg = "OK - the update waits. It will be offered again next time you open the Companion, or install it any time from here."
+		u.core.Log.Infof("user deferred staged Companion update")
+	}
 	if u.btnInstallUpdate.Clicked(gtx) {
 		st := updateSnapshot()
 		if u.updatePath == "" {
@@ -869,7 +888,24 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		ipNote = "This computer's address(es): " + strings.Join(ips, ", ") + ". The filled-in one is on your Cardputers' network when they have been found; the address must match the network your devices are on (same first three numbers as the device IP)."
 	}
 
+	if u.tabRows.get("compactset").Clicked(gtx) {
+		u.compactSet = !u.compactSet
+		if u.compactSet {
+			u.toastGood("Streamlined Settings: explanatory prose hidden. Toggle again to bring it back.", 5)
+		}
+	}
 	form := []layout.FlexChild{
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return material.Clickable(gtx, u.tabRows.get("compactset"), func(gtx layout.Context) layout.Dimensions {
+				return bgFill(gtx, colPanel, 8, pad(8, func(gtx layout.Context) layout.Dimensions {
+					mode := "Full explanations"
+					if u.compactSet {
+						mode = "Streamlined (prose hidden)"
+					}
+					return u.bold(12, colCyan, "Settings view: "+mode+" - click to switch").Layout(gtx)
+				}))
+			})
+		}),
 		sectionTitle(u, "Listener"),
 		caption(u, "Cardputers connect here to sync logs and stream live status. Default 8791 - must match desktop.txt on the cards."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -997,6 +1033,43 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.btn(&u.btnSavePresence, "Save presence settings").Layout(gtx)
 		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			// Update-ready prompt (v1.8.9): never restart under the
+			// user uninvited. Offer Restart now / Later; Later snoozes
+			// until the next launch.
+			st := updateSnapshot()
+			ready := u.updatePath != "" || st.stagedPath != ""
+			if !ready || u.updateLater {
+				return layout.Dimensions{}
+			}
+			ver := st.latest.Version
+			if ver == "" {
+				ver = "new"
+			}
+			return bgFill(gtx, colPanel2, 10, pad(12, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.bold(13, colText, "Update ready - Companion v"+ver+" is downloaded and verified").Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(12, colDim, "Restart now to finish, or Later if you're mid-task - nothing restarts without you. Your Library and settings are kept either way.").Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 8) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btn(&u.btnInstallUpdate, "Restart now to update").Layout(gtx)
+							}),
+							layout.Rigid(hSpace(10)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btnGhost(&u.btnUpdateLater, "Later").Layout(gtx)
+							}),
+						)
+					}),
+				)
+			}))
+		}),
 		sectionTitle(u, "Updates & removal"),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
@@ -1081,231 +1154,35 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 		sectionTitle(u, "The family - who connects to this hub, and how"),
-		caption(u, "Each program has its own job and its own artwork. Linked ones find this PC themselves; TALON and KEEPER never link, by design."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("PHOENIX")
+			// Compact (v1.8.9): this used to be eight full cards of
+			// scroll. Each program's Dashboard tab now carries the
+			// same info with live state - here is the one-line map.
 			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "PHOENIX", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
+				rows := make([]layout.FlexChild, 0, len(familyOrder))
+				for _, prog := range familyOrder {
+					prog := prog
+					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						info := infoFor(prog)
+						return layout.Inset{Bottom: 3}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return u.artBadge(gtx, prog, 0.95)
+								}),
+								layout.Rigid(hSpace(8)),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return u.label(11.5, colText, info.Title+" · "+info.Device+" - "+info.Role).Layout(gtx)
+								}),
+							)
+						})
+					}))
+				}
+				rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(11, colFaint, "Full detail + live state: click a program on the Dashboard. TALON and KEEPER never link, by design.").Layout(gtx)
+				}))
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
 			}))
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("SCRIBE")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "SCRIBE", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("HEARTH")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "HEARTH", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("HERALD")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "HERALD", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("BENCH")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "BENCH", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("LANTERN")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "LANTERN", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("KEEPER")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "KEEPER", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("TALON")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "TALON", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
 		sectionTitle(u, "Wardrive map"),
 		caption(u, "The Wardrive Map page shows real street maps by default (OpenStreetMap tiles, downloaded once and cached in the Library - currently "+humanBytes(u.tileBytes(cfg.Library))+"). The schematic plot is the offline fallback. Clearing the cache only costs a re-download."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {

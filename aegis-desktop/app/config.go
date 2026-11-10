@@ -39,7 +39,7 @@ type Config struct {
 const (
 	defaultPort    = 8791
 	configFileName = "aegis-companion.json"
-	appVersion     = "1.8.7"
+	appVersion     = "1.8.9"
 )
 
 // exeDir is the folder the program lives in. Config, Library and logs sit
@@ -103,11 +103,17 @@ func (c *Config) Save() error {
 		return err
 	}
 	p := configPath()
-	if err := os.WriteFile(p, data, 0o600); err != nil {
+	// Atomic (v1.8.9): write temp + rename, so a power cut mid-save
+	// can never leave a half-written settings file.
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	// os.WriteFile honours umask on first create; tighten explicitly.
+	if err := os.Rename(tmp, p); err != nil {
+		return err
+	}
 	_ = os.Chmod(p, 0o600)
+	backupConfigCopy() // rotating snapshots beside the program
 	return nil
 }
 

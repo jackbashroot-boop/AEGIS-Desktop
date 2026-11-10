@@ -28,6 +28,24 @@ var phoenixGIF []byte
 //go:embed assets/talon.gif
 var talonGIF []byte
 
+//go:embed assets/scribe.gif
+var scribeGIF []byte
+
+//go:embed assets/hearth.gif
+var hearthGIF []byte
+
+//go:embed assets/herald.gif
+var heraldGIF []byte
+
+//go:embed assets/bench.gif
+var benchGIF []byte
+
+//go:embed assets/lantern.gif
+var lanternGIF []byte
+
+//go:embed assets/keeper.gif
+var keeperGIF []byte
+
 var (
 	animOnce   sync.Once
 	animFrames = map[string][]paint.ImageOp{}
