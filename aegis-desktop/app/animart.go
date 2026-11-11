@@ -28,6 +28,24 @@ var phoenixGIF []byte
 //go:embed assets/talon.gif
 var talonGIF []byte
 
+//go:embed assets/scribe.gif
+var scribeGIF []byte
+
+//go:embed assets/hearth.gif
+var hearthGIF []byte
+
+//go:embed assets/herald.gif
+var heraldGIF []byte
+
+//go:embed assets/bench.gif
+var benchGIF []byte
+
+//go:embed assets/lantern.gif
+var lanternGIF []byte
+
+//go:embed assets/keeper.gif
+var keeperGIF []byte
+
 var (
 	animOnce   sync.Once
 	animFrames = map[string][]paint.ImageOp{}
@@ -35,7 +53,10 @@ var (
 )
 
 func loadAnimArt() {
-	for prog, raw := range map[string][]byte{"PHOENIX": phoenixGIF, "TALON": talonGIF} {
+	// Every embedded program GIF is decoded (before v1.8.12 only
+	// PHOENIX and TALON were, so the rest of the family silently
+	// fell back to static art and looked uninstalled).
+	for prog, raw := range map[string][]byte{"PHOENIX": phoenixGIF, "TALON": talonGIF, "SCRIBE": scribeGIF, "HEARTH": hearthGIF, "HERALD": heraldGIF, "BENCH": benchGIF, "LANTERN": lanternGIF, "KEEPER": keeperGIF} {
 		g, err := gif.DecodeAll(bytes.NewReader(raw))
 		if err != nil {
 			animErr = fmt.Errorf("decode %s gif: %w", prog, err)

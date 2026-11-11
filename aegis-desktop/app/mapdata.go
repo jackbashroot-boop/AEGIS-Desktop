@@ -50,6 +50,139 @@ type MapData struct {
 	NoGPS                int // sighting records that had no GPS fix
 	RouteKm              float64
 	CenterLat, CenterLon float64
+
+	// Wi-Fi position estimates (v1.8.7): where GPS had no fix, the
+	// device still logged which known APs it could hear and how
+	// strongly. Those scan groups are positioned from the mapped
+	// APs (RSSI-weighted), honestly labelled estimates - EstUnc[i]
+	// is the ± radius in metres for EstTrack[i]. This is Wi-Fi
+	// positioning from your own atlas, not a cloud lookup.
+	EstTrack [][2]float64
+	EstUnc   []float64
+
+	// Segment starts (v1.8.12): Track/EstTrack concatenate many
+	// files and days. TrackSeg[i] is an index into Track where a
+	// new file's route begins, so drawing can lift the pen instead
+	// of drawing one straight line across town between drives,
+	// and RouteKm never counts those jumps.
+	TrackSeg []int
+	EstSeg   []int
+}
+
+// segBreaks turns segment-start indices into a lookup set.
+func segBreaks(seg []int) map[int]bool {
+	m := map[int]bool{}
+	for _, i := range seg {
+		m[i] = true
+	}
+	return m
+}
+
+// repairSwappedCoords fixes records whose latitude/longitude were
+// written the wrong way round (v1.8.12): Connecticut (41.5, -72.1)
+// swapped is (-72.1, 41.5) - the southern ocean - and one such
+// record used to drag the whole map frame with it ("the lat and
+// long is affecting it"). A point only counts as swapped when it
+// sits over 400 km from the dataset's robust centre AND its
+// mirror lands within 150 km of that centre: unambiguous.
+func repairSwappedCoords(observations map[string][]MapPoint) {
+	var lats, lons []float64
+	for _, g := range observations {
+		for _, p := range g {
+			if validLatLon(p.Lat, p.Lon) {
+				lats = append(lats, p.Lat)
+				lons = append(lons, p.Lon)
+			}
+		}
+	}
+	if len(lats) < 4 {
+		return
+	}
+	cLat, cLon := medianFloat(lats), medianFloat(lons)
+	for k, g := range observations {
+		for i, p := range g {
+			if !validLatLon(p.Lat, p.Lon) {
+				continue
+			}
+			if distanceM(p.Lat, p.Lon, cLat, cLon) <= 400000 {
+				continue
+			}
+			sLat, sLon := p.Lon, p.Lat
+			if validLatLon(sLat, sLon) && distanceM(sLat, sLon, cLat, cLon) < 150000 {
+				g[i].Lat, g[i].Lon = sLat, sLon
+			}
+		}
+		observations[k] = g
+	}
+}
+
+// frameBounds returns the extent the map should frame: all valid
+// points/track/estimates with far-flung outliers trimmed
+// (v1.8.12). One bad fix hundreds of km away used to stretch the
+// frame until the real drive shrank to a dot. Outliers remain in
+// the data and the list under the map; they just do not set the
+// frame.
+func frameBounds(d MapData) (minLat, minLon, maxLat, maxLon float64, ok bool) {
+	var pts [][2]float64
+	corrupt := false
+	add := func(lat, lon float64) {
+		// NaN/Inf is corrupt data, not an outlier: the tile
+		// builders' contract is to refuse it outright (the parsers
+		// already reject it, so this only fires on hand-built or
+		// damaged MapData). (0,0) "no fix" sentinels just skip.
+		if math.IsNaN(lat) || math.IsNaN(lon) || math.IsInf(lat, 0) || math.IsInf(lon, 0) {
+			corrupt = true
+			return
+		}
+		if validLatLon(lat, lon) {
+			pts = append(pts, [2]float64{lat, lon})
+		}
+	}
+	for _, p := range d.Points {
+		add(p.Lat, p.Lon)
+	}
+	for _, tp := range d.Track {
+		add(tp[0], tp[1])
+	}
+	for _, tp := range d.EstTrack {
+		add(tp[0], tp[1])
+	}
+	if corrupt || len(pts) == 0 {
+		return 0, 0, 0, 0, false
+	}
+	use := pts
+	if len(pts) >= 6 {
+		var lats, lons []float64
+		for _, p := range pts {
+			lats = append(lats, p[0])
+			lons = append(lons, p[1])
+		}
+		cLat, cLon := medianFloat(lats), medianFloat(lons)
+		var near [][2]float64
+		for _, p := range pts {
+			if distanceM(p[0], p[1], cLat, cLon) <= 250000 {
+				near = append(near, p)
+			}
+		}
+		if len(near) >= 3 {
+			use = near
+		}
+	}
+	minLat, minLon = math.Inf(1), math.Inf(1)
+	maxLat, maxLon = math.Inf(-1), math.Inf(-1)
+	for _, p := range use {
+		minLat, maxLat = math.Min(minLat, p[0]), math.Max(maxLat, p[0])
+		minLon, maxLon = math.Min(minLon, p[1]), math.Max(maxLon, p[1])
+	}
+	return minLat, minLon, maxLat, maxLon, true
+}
+
+// wifiSighting is one no-GPS AP record kept for Wi-Fi positioning.
+type wifiSighting struct {
+	BSSID string
+	SSID  string
+	RSSI  int
+	TS    float64 // seconds (device uptime in PHOENIX logs)
 }
 
 func validLatLon(lat, lon float64) bool {
@@ -326,7 +459,7 @@ func LoadMapData(root string) MapData {
 	var d MapData
 	observations := map[string][]MapPoint{}
 	daySet := map[string]bool{}
-	var track [][2]float64
+	var orphanGroups [][]wifiSighting // per-file no-GPS sightings, for Wi-Fi positioning
 
 	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
@@ -336,6 +469,7 @@ func LoadMapData(root string) MapData {
 		var pts []MapPoint
 		var trk [][2]float64
 		var noGPS int
+		var orphans []wifiSighting
 		switch {
 		case strings.HasSuffix(name, ".geojson"):
 			pts = parseGeoJSON(path)
@@ -344,9 +478,12 @@ func LoadMapData(root string) MapData {
 		case strings.HasSuffix(name, ".csv"):
 			pts = parseMapCSV(path)
 		case strings.HasSuffix(name, ".jsonl"):
-			pts, noGPS = parseSightingJSONL(path)
+			pts, noGPS, orphans = parseSightingJSONLFull(path)
 		default:
 			return nil
+		}
+		if len(orphans) > 0 {
+			orphanGroups = append(orphanGroups, orphans)
 		}
 		if len(pts) == 0 && len(trk) == 0 && noGPS == 0 {
 			return nil
@@ -366,9 +503,25 @@ func LoadMapData(root string) MapData {
 			}
 			observations[key] = append(observations[key], p)
 		}
-		track = append(track, trk...)
+		if len(trk) > 0 {
+			// Per file (v1.8.12): clean and measure each drive on
+			// its own, and remember where the next segment starts,
+			// instead of gluing every day into one route.
+			ct := cleanTrack(trk)
+			if len(ct) > 0 {
+				if len(d.Track) > 0 {
+					d.TrackSeg = append(d.TrackSeg, len(d.Track))
+				}
+				for i := 1; i < len(ct); i++ {
+					d.RouteKm += haversineKm(ct[i-1][0], ct[i-1][1], ct[i][0], ct[i][1])
+				}
+				d.Track = append(d.Track, ct...)
+			}
+		}
 		return nil
 	})
+
+	repairSwappedCoords(observations)
 
 	for _, group := range observations {
 		d.Points = append(d.Points, estimateMapPoint(group))
@@ -379,16 +532,111 @@ func LoadMapData(root string) MapData {
 		}
 		return d.Points[i].BSSID < d.Points[j].BSSID
 	})
-	d.Track = cleanTrack(track)
-	for i := 1; i < len(d.Track); i++ {
-		d.RouteKm += haversineKm(d.Track[i-1][0], d.Track[i-1][1], d.Track[i][0], d.Track[i][1])
-	}
 	for day := range daySet {
 		d.Days = append(d.Days, day)
 	}
 	sort.Strings(d.Days)
+
+	// Wi-Fi positioning: place no-GPS scan groups from the APs we
+	// have already mapped with GPS. Estimates only - they never
+	// feed back into AP positions.
+	known := make(map[string]MapPoint, len(d.Points))
+	for _, p := range d.Points {
+		known[strings.ToUpper(p.BSSID)] = p
+	}
+	for _, group := range orphanGroups {
+		est, unc := estimateWiFiPositions(known, group)
+		if len(est) > 0 && len(d.EstTrack) > 0 {
+			d.EstSeg = append(d.EstSeg, len(d.EstTrack))
+		}
+		d.EstTrack = append(d.EstTrack, est...)
+		d.EstUnc = append(d.EstUnc, unc...)
+	}
+
 	d.CenterLat, d.CenterLon = robustCenter(d.Points, d.Track)
 	return d
+}
+
+// estimateWiFiPositions turns groups of no-GPS sightings (same
+// ~20 s scan window, strongest RSSI per BSSID) into device position
+// estimates from already-mapped APs. A group needs at least two
+// known APs; the estimate is the RSSI-range-weighted centroid and
+// the uncertainty is the weighted spread around it, clamped to
+// honest bounds. Groups whose APs disagree wildly are dropped.
+func estimateWiFiPositions(known map[string]MapPoint, orphans []wifiSighting) (track [][2]float64, unc []float64) {
+	if len(known) == 0 || len(orphans) == 0 {
+		return nil, nil
+	}
+	buckets := map[int64]map[string]wifiSighting{}
+	var order []int64
+	for _, o := range orphans {
+		b := int64(o.TS / 20)
+		m := buckets[b]
+		if m == nil {
+			m = map[string]wifiSighting{}
+			buckets[b] = m
+			order = append(order, b)
+		}
+		key := strings.ToUpper(o.BSSID)
+		if prev, ok := m[key]; !ok || o.RSSI > prev.RSSI {
+			m[key] = o
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	for _, b := range order {
+		type apRef struct {
+			p    MapPoint
+			rssi int
+		}
+		var refs []apRef
+		for key, o := range buckets[b] {
+			p, ok := known[key]
+			if !ok || p.UncertaintyM > 400 {
+				continue
+			}
+			refs = append(refs, apRef{p, o.RSSI})
+		}
+		if len(refs) < 2 {
+			continue
+		}
+		var sw, slat, slon float64
+		ws := make([]float64, len(refs))
+		for i, r := range refs {
+			// Crude indoor/outdoor path-loss range from RSSI, then
+			// inverse-square weight, discounted by how well the
+			// AP itself is mapped.
+			rng := math.Pow(10, (-45-float64(r.rssi))/25)
+			effUnc := math.Max(r.p.UncertaintyM, 30)
+			w := 1 / ((rng*rng + 9) * (1 + effUnc/100))
+			ws[i] = w
+			sw += w
+			slat += w * r.p.Lat
+			slon += w * r.p.Lon
+		}
+		if sw == 0 {
+			continue
+		}
+		lat, lon := slat/sw, slon/sw
+		var spread float64
+		for i, r := range refs {
+			dist := haversineKm(lat, lon, r.p.Lat, r.p.Lon) * 1000
+			spread += ws[i] * dist * dist
+		}
+		spread = math.Sqrt(spread / sw)
+		if spread > 1200 {
+			continue // known APs too scattered: no honest estimate
+		}
+		u := spread*0.7 + 20
+		if u < 25 {
+			u = 25
+		}
+		if u > 900 {
+			u = 900
+		}
+		track = append(track, [2]float64{lat, lon})
+		unc = append(unc, u)
+	}
+	return track, unc
 }
 
 // ---- parsers -----------------------------------------------------------
@@ -522,9 +770,16 @@ func parseMapCSV(path string) []MapPoint {
 // records carrying a BSSID (wardrive sightings). Records without a valid
 // fix are counted separately so the UI can say "N sightings had no GPS".
 func parseSightingJSONL(path string) (pts []MapPoint, noGPS int) {
+	pts, noGPS, _ = parseSightingJSONLFull(path)
+	return pts, noGPS
+}
+
+// parseSightingJSONLFull also keeps the no-GPS records (as orphans
+// for Wi-Fi positioning) instead of only counting them.
+func parseSightingJSONLFull(path string) (pts []MapPoint, noGPS int, orphans []wifiSighting) {
 	fh, err := os.Open(path)
 	if err != nil {
-		return nil, 0
+		return nil, 0, nil
 	}
 	defer fh.Close()
 	sc := bufio.NewScanner(fh)
@@ -546,6 +801,12 @@ func parseSightingJSONL(path string) (pts []MapPoint, noGPS int) {
 		lon := propFloat(m, "lon", "lng", "longitude")
 		if !validLatLon(lat, lon) {
 			noGPS++
+			orphans = append(orphans, wifiSighting{
+				BSSID: bssid,
+				SSID:  propStr(m, "ssid", "SSID"),
+				RSSI:  propInt(m, "rssi", "RSSI"),
+				TS:    propFloat(m, "ts", "time", "timestamp"),
+			})
 			continue
 		}
 		pts = append(pts, MapPoint{
@@ -560,7 +821,7 @@ func parseSightingJSONL(path string) (pts []MapPoint, noGPS int) {
 			HDOP:      propFloat(m, "hdop", "HDOP"),
 		})
 	}
-	return pts, noGPS
+	return pts, noGPS, orphans
 }
 
 func propFloat(m map[string]any, keys ...string) float64 {

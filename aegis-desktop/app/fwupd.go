@@ -323,7 +323,7 @@ func (u *UI) syncEverything() {
 	case offers > 0:
 		u.toastGood("Update offered - press ENTER on the Cardputer to accept. It pulls the image over Wi-Fi and flashes itself.", 9)
 	case uv.haveRemote:
-		u.toastGood("Companion "+uv.latest.Version+" is available - Settings > Install update finishes it (the app restarts itself). Devices are already current.", 9)
+		u.toastGood("Companion "+uv.latest.effVersion()+" is available - Settings > Install update finishes it (the app restarts itself). Devices are already current.", 9)
 	default:
 		u.toastGood("Checking everything... watch the Updates panel - if a newer PHOENIX appears, it downloads here, then offers itself to your Cardputer.", 8)
 		if fw.FeedVer == "" {

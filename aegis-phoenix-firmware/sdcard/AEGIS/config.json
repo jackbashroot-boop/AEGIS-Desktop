@@ -1,0 +1,10 @@
+{
+  "wifi_ssid": "",
+  "wifi_psk": "",
+  "console_url": "",
+  "enroll_token": "",
+  "hmac_secret": "",
+  "tls_insecure": false,
+  "heartbeat_sec": 30,
+  "vault_passphrase": ""
+}

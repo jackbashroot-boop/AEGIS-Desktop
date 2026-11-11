@@ -522,6 +522,7 @@ static void processWifiScanResults(int n) {
   int bestCorpRssi = -100;
   for (int i = 0; i < n; i++) for (auto& s : corpSsids) if (WiFi.SSID(i) == s && WiFi.RSSI(i) > bestCorpRssi) bestCorpRssi = WiFi.RSSI(i);
   for (int i = 0; i < n; i++) {
+    if ((i & 0x0F) == 0) esp_task_wdt_reset();   // long AP lists must not starve the WDT
     String bssid = WiFi.BSSIDstr(i); bssid.toLowerCase();
     bool known = std::find(knownBssids.begin(), knownBssids.end(), bssid) != knownBssids.end();
     bool corpSsid = std::find(corpSsids.begin(), corpSsids.end(), WiFi.SSID(i)) != corpSsids.end();
@@ -541,6 +542,7 @@ static void processWifiScanResults(int n) {
     // Every scan feeds the persistent Wi-Fi Atlas (channels per network);
     // wardrive records are deduplicated by the WardriveStore.
     for (int i = 0; i < n; i++) {
+      if ((i & 0x0F) == 0) esp_task_wdt_reset();
       const bool fix = gnssHat.positionForLog();
       g_wifiAtlas.observe(WiFi.SSID(i), WiFi.BSSIDstr(i), WiFi.channel(i), WiFi.RSSI(i),
                           fix ? gnssHat.currentFix.latitude : 0, fix ? gnssHat.currentFix.longitude : 0,
@@ -919,8 +921,22 @@ void agentSetup() {
     if (g_diagMode) {
       if (g_prevStage == "rfid-poll") g_healNote = "RFID probe forced OFF";
       else if (g_prevStage == "scans" || g_prevStage.startsWith("sc-")) {
-        g_backgroundScansEnabled = false;   // this boot only; user pref kept
-        g_healNote = "background scans paused this boot";
+        // Escalating heal (v0.12.15): pausing "this boot only" looped
+        // forever when the crash lived in the scan path - every boot
+        // crashed again at the same stage and re-entered safe mode.
+        // First crash: pause for this boot. Second: turn background
+        // scans OFF in the saved settings (SETTINGS can re-enable)
+        // so the device boots clean and stays up.
+        const uint32_t sc = prefs.getUInt("scCrash", 0) + 1;
+        prefs.putUInt("scCrash", sc);
+        g_backgroundScansEnabled = false;
+        if (sc >= 2) {
+          prefs.putBool("bgScans", false);
+          g_healNote = "bg scans OFF after repeat crashes (SETTINGS to re-enable)";
+        } else {
+          g_healNote = "background scans paused this boot";
+        }
+        Serial.printf("[CRASH] scan-stage crash #%u heal: %s\n", (unsigned)sc, g_healNote.c_str());
       } else if (g_prevStage == "lora-poll" || g_prevStage == "lora-step")
         g_healNote = "LoRa radio state reset";
       else if (g_prevStage != "none" && g_prevStage != "idle")

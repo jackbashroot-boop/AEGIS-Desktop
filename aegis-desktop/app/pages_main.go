@@ -35,6 +35,30 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 	devs := u.core.Live.Snapshot()
 	online := u.core.Live.OnlineCount()
 
+	// Dashboard tabs (v1.8.8): Overview + one tab per program. The old
+	// standalone Live Monitor page folded into these tabs.
+	if u.dashTab != "" {
+		ok := false
+		for _, p := range familyOrder {
+			if p == u.dashTab {
+				ok = true
+			}
+		}
+		if !ok {
+			u.dashTab = ""
+		}
+	}
+	if u.dashTab != "" {
+		prog := u.dashTab
+		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+			layout.Rigid(u.tabStrip),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 12) }),
+			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+				return u.pageProgram(gtx, prog)
+			}),
+		)
+	}
+
 	problemsCol := colCyan
 	if bad > 0 {
 		problemsCol = colRed
@@ -259,7 +283,7 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 					}
 				} else if u.core.Cfg.HomeSSID != "" {
 					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.label(12, colDim, "Who's home: name your phone/TV in Settings (Name=MAC lines); your Cardputers show up by themselves.").Layout(gtx)
+						return u.label(12, colDim, "Who's home: pick your phone/TV in Settings → Presence (devices listed with their MACs); your Cardputers show up by themselves.").Layout(gtx)
 					}))
 				}
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
@@ -276,7 +300,7 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 			compLine := "Companion " + appVersion + " (this PC)"
 			switch {
 			case uv.haveRemote:
-				compLine += " -> " + uv.latest.Version + " available"
+				compLine += " -> " + uv.latest.effVersion() + " available"
 			case uv.checked:
 				compLine += " - up to date"
 			default:
@@ -387,6 +411,9 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			found := u.core.Disco.Found()
 			if len(found) == 0 {
+				if n, ip, _ := u.core.Disco.Rejects(); n > 0 {
+					return u.label(11.5, colAmber, fmt.Sprintf("Heard %d announcement(s) from %s but the security proof did not match - the token on that SD card differs from this PC's. Fix: Settings > Connection > re-write AEGIS_LINK to the card (or regenerate the token there). This notice is why nothing is listed.", n, ip)).Layout(gtx)
+				}
 				return u.label(11.5, colDim, "None yet. A Cardputer appears here when it is on your Wi-Fi with the SD link file inserted (PHOENIX 0.12.2+ names itself by answering the ping; the others appear when they come looking for this PC). Finding is not linking - you still approve on the device.").Layout(gtx)
 			}
 			rows := make([]layout.FlexChild, 0, len(found))
@@ -435,6 +462,11 @@ func (u *UI) pageDashboard(gtx layout.Context) layout.Dimensions {
 				}),
 				layout.Flexed(1, u.dashRecentActivity),
 			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 14) }),
+		// other devices on the network (v1.8.8 census)
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.networkBox(gtx)
 		}),
 	}
 	const chunk = 2
@@ -808,6 +840,15 @@ func (u *UI) liveDetail(gtx layout.Context, d DeviceLive) layout.Dimensions {
 							txt += fmt.Sprintf(" · %d jump(s) rejected", d.GPSRej)
 						}
 						return txt
+					}()),
+					kv("Wi-Fi sensing (CSI)", func() string {
+						if !d.HasCSI {
+							return "not reported (enable Presence sense on the device)"
+						}
+						if d.CSIMot {
+							return fmt.Sprintf("MOTION nearby · score %d/100", d.CSI)
+						}
+						return fmt.Sprintf("quiet · score %d/100", d.CSI)
 					}()),
 					kv("link", map[bool]string{true: "online", false: "offline (silent >12 s)"}[online]),
 				)

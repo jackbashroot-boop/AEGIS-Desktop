@@ -110,6 +110,17 @@ class LoRaHatDriver {
     return true;
   }
 
+  // Transmit one short packet at the configured power (v0.12.9),
+  // then return to continuous receive. Blocking for the airtime
+  // (~0.3 s for a beacon at SF9) - callers keep packets rare.
+  bool transmit(const String& payload) {
+    if (!active || !radio_ || !payload.length()) return false;
+    String copy = payload;   // this RadioLib wants String& (non-const)
+    const int st = radio_->transmit(copy);
+    radio_->startReceive();   // always re-arm RX, success or not
+    return st == RADIOLIB_ERR_NONE;
+  }
+
   // Packet callback: void cb(hexPayload, rssiDbm, snrDb)
   void poll(void (*onPacket)(const String& hexData, int rssi, float snr)) {
     if (!active || !radio_) return;
@@ -136,7 +147,14 @@ class LoRaHatDriver {
       // we identify the shape honestly instead of faking a decode.
       {
         const uint8_t mtype = buf[0] >> 5;
-        if (len >= 12 && mtype <= 6) {
+        if (len >= 6 && memcmp(buf, "AEGIS1", 6) == 0) {
+          // Family presence beacon (v0.12.9): "AEGIS1 <PROG> <fw> <mac6>"
+          char det[64];
+          size_t cplen = len < sizeof(det) - 1 ? len : sizeof(det) - 1;
+          memcpy(det, buf, cplen); det[cplen] = 0;
+          lastPacketKind = "AEGIS beacon";
+          lastPacketDetail = det;
+        } else if (len >= 12 && mtype <= 6) {
           char det[72];
           const uint32_t devAddr = (uint32_t)buf[1] | ((uint32_t)buf[2] << 8) |
                                    ((uint32_t)buf[3] << 16) | ((uint32_t)buf[4] << 24);

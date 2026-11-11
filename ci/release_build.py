@@ -94,15 +94,27 @@ def main():
         e = dict(env, GOOS=goos, GOARCH='amd64')
         subprocess.run(['go', 'build', '-ldflags', '-s -w', '-o', str(ASSETS / name), '.'], cwd=src, env=e, check=True)
         print('built', name, (ASSETS / name).stat().st_size)
-    feed = {'version': SUITE, 'notes': f'AEGIS Suite {SUITE} (Companion {comp_ver}, PHOENIX {fw_ver})',
+    # Feed contract (fixed in 1.2.22): "version"/"companion" carry the
+    # COMPANION version - the updater compares it against its own
+    # 1.8.x. Suite 1.2.15-1.2.21 feeds put the suite 1.2.x there, which
+    # always sorted older, so no Companion ever saw an update. The
+    # suite version rides along in "suite" for display only. Entries
+    # carry both "file" and "name" plus the flat legacy keys so every
+    # Companion parser back to 1.8.2 can name, download and verify.
+    feed = {'version': comp_ver, 'companion': comp_ver, 'suite': SUITE,
+            'notes': f'AEGIS Suite {SUITE} (Companion {comp_ver}, PHOENIX {fw_ver})',
             'files': {
-                'linux':   {'file': 'Aegis-Suite-Setup-Linux', 'sha256': sha(ASSETS / 'Aegis-Suite-Setup-Linux')},
-                'windows': {'file': 'Aegis-Suite-Setup-Windows.exe', 'sha256': sha(ASSETS / 'Aegis-Suite-Setup-Windows.exe')},
-            }}
+                'linux':   {'file': 'Aegis-Suite-Setup-Linux', 'name': 'Aegis-Suite-Setup-Linux', 'sha256': sha(ASSETS / 'Aegis-Suite-Setup-Linux')},
+                'windows': {'file': 'Aegis-Suite-Setup-Windows.exe', 'name': 'Aegis-Suite-Setup-Windows.exe', 'sha256': sha(ASSETS / 'Aegis-Suite-Setup-Windows.exe')},
+            },
+            'file_linux': 'Aegis-Suite-Setup-Linux',
+            'file_windows': 'Aegis-Suite-Setup-Windows.exe'}
     for goos, key in [('linux', 'linux'), ('windows', 'windows')]:
         f = ASSETS / feed['files'][key]['file']
         if f.exists():
-            feed[key] = {'file': f.name, 'sha256': sha(f), 'size': f.stat().st_size}
+            feed['files'][key]['size'] = f.stat().st_size
+            feed[key] = {'file': f.name, 'name': f.name, 'sha256': sha(f), 'size': f.stat().st_size}
+            feed[f'sha256_{key}'] = sha(f)
     (ASSETS / 'latest.json').write_text(json.dumps(feed, indent=2))
     phx_feed = {'version': fw_ver, 'file': 'aegis-phoenix-adv.bin',
                 'sha256': sha(ASSETS / 'aegis-phoenix-adv.bin'),

@@ -54,6 +54,7 @@ type presenceEngine struct {
 	calm     float64
 	calmN    int
 	score    float64
+	smooth   float64 // EMA-smoothed ripple (v1.8.8)
 	motion   bool
 	people   []homePerson
 	aps      int
@@ -267,8 +268,24 @@ func presenceLoop(core *Core) {
 			gPresence.calm = gPresence.calm*0.92 + score*0.08
 			gPresence.calmN++
 		}
-		gPresence.score = score
-		gPresence.motion = gPresence.calmN >= 4 && score > gPresence.calm+22 && score > 30
+		// Smooth first (v1.8.8): one odd scan must not cry motion.
+		// EMA 0.45 + enter/exit hysteresis around the learned calm
+		// baseline keeps updates real-time but calm.
+		if gPresence.smooth == 0 {
+			gPresence.smooth = score
+		} else {
+			gPresence.smooth = gPresence.smooth*0.55 + score*0.45
+		}
+		gPresence.score = gPresence.smooth
+		if gPresence.calmN >= 4 {
+			if gPresence.motion {
+				gPresence.motion = gPresence.smooth > gPresence.calm+10 && gPresence.smooth > 22
+			} else {
+				gPresence.motion = gPresence.smooth > gPresence.calm+22 && gPresence.smooth > 30
+			}
+		} else {
+			gPresence.motion = false
+		}
 		gPresence.points = append(gPresence.points, presPoint{At: now, Score: score})
 		if len(gPresence.points) > 120 {
 			gPresence.points = gPresence.points[len(gPresence.points)-120:]

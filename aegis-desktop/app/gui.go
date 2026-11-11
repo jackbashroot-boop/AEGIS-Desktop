@@ -96,6 +96,7 @@ const (
 	pgReports
 	pgLog
 	pgSettings
+	pgSystem
 )
 
 var pageTitles = map[pageID]string{
@@ -106,6 +107,7 @@ var pageTitles = map[pageID]string{
 	pgReports:  "Reports",
 	pgLog:      "Activity Log",
 	pgSettings: "Settings",
+	pgSystem:   "System",
 }
 
 type UI struct {
@@ -115,10 +117,26 @@ type UI struct {
 
 	navClicks map[pageID]*widget.Clickable
 
-	liveRows *clickSet
-	selProg  string
-	dashList widget.List
-	liveList widget.List
+	liveRows       *clickSet
+	selProg        string
+	dashList       widget.List
+	liveList       widget.List
+	tabList        widget.List
+	tabRows        *clickSet
+	dashTab        string // "" = Overview, else the program whose tab is open
+	btnTabLib      widget.Clickable
+	compactSet     bool
+	showRepo       bool   // System: repo & recovery commands expanded (v1.8.12)
+	whoPickOpen    bool   // Settings: who's-home device picker expanded (v1.8.12)
+	openMenu       string // key of the currently open dropdown, "" = none (v1.8.12)
+	locBusy        bool   // Settings: PC-location lookup in flight (v1.8.12)
+	btnLocAllow    widget.Clickable
+	btnLocManual   widget.Clickable
+	btnLocDeny     widget.Clickable
+	sysList        widget.List
+	btnBackupNow   widget.Clickable
+	btnUpdateLater widget.Clickable
+	updateLater    bool // user chose "Later" on the update prompt
 
 	mapList       widget.List
 	mapRows       *clickSet
@@ -155,6 +173,7 @@ type UI struct {
 	tilesBusy     string
 	btnMapWeb     widget.Clickable
 	btnMapGMaps   widget.Clickable
+	btnMapShare   widget.Clickable
 	btnMapRefresh widget.Clickable
 	mapData       *MapData
 	mapSize       int64
@@ -244,15 +263,17 @@ func newUI(core *Core) *UI {
 	u := &UI{
 		core: core, th: th, page: pgDash,
 		navClicks: map[pageID]*widget.Clickable{},
-		liveRows:  newClickSet(), libDays: newClickSet(), libProgs: newClickSet(),
+		liveRows:  newClickSet(), tabRows: newClickSet(), libDays: newClickSet(), libProgs: newClickSet(),
 		fwRows:  newClickSet(),
 		mapRows: newClickSet(), famRows: newClickSet(), mapReal: true,
 		areaProg: newAreaProgress(),
 		repRows:  newClickSet(), repExpand: newClickSet(), expanded: map[string]bool{},
 	}
-	for _, p := range []pageID{pgDash, pgLive, pgMap, pgLibrary, pgReports, pgLog, pgSettings} {
+	for _, p := range []pageID{pgDash, pgLive, pgMap, pgLibrary, pgReports, pgLog, pgSettings, pgSystem} {
 		u.navClicks[p] = &widget.Clickable{}
 	}
+	u.sysList.List.Axis = layout.Vertical
+	u.tabList.List.Axis = layout.Horizontal
 	u.dashList.List.Axis = layout.Vertical
 	u.setList.List.Axis = layout.Vertical
 	u.liveList.List.Axis = layout.Vertical
@@ -323,6 +344,8 @@ func runGUI(core *Core) {
 	// latest.json; nothing downloads without a click.
 	startUpdateCheck(core.Cfg)
 	startPresence(core)
+	startNetCensus(core)
+	startSysInfo()
 	go func() {
 		for {
 			if !runWindowOnce(core, u, tm) {
@@ -674,6 +697,9 @@ func (u *UI) sidebar(gtx layout.Context) layout.Dimensions {
 				return layout.Dimensions{Size: gtx.Constraints.Min}
 			}),
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Left: 14, Right: 14, Bottom: 10}.Layout(gtx, u.liveNowBox)
+			}),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Inset{Left: 14, Right: 14, Bottom: 14}.Layout(gtx, u.listenerCard)
 			}),
 		)
@@ -686,8 +712,7 @@ func (u *UI) navList(gtx layout.Context) layout.Dimensions {
 		label string
 		badge func() string
 	}{
-		{pgDash, "Dashboard", nil},
-		{pgLive, "Live Monitor", func() string {
+		{pgDash, "Dashboard", func() string {
 			if n := u.core.Live.OnlineCount(); n > 0 {
 				return fmt.Sprint(n)
 			}
@@ -702,6 +727,7 @@ func (u *UI) navList(gtx layout.Context) layout.Dimensions {
 		{pgLibrary, "Library", nil},
 		{pgReports, "Reports", nil},
 		{pgLog, "Activity Log", nil},
+		{pgSystem, "System", nil},
 		{pgSettings, "Settings", nil},
 	}
 	widgets := make([]layout.FlexChild, 0, len(items))
@@ -797,24 +823,113 @@ func (u *UI) content(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(u.toastBanner),
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.Inset{Top: 14, Left: 22, Right: 22, Bottom: 16}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				switch u.page {
-				case pgDash:
-					return u.pageDashboard(gtx)
-				case pgLive:
-					return u.pageLive(gtx)
-				case pgMap:
-					return u.pageMap(gtx)
-				case pgLibrary:
-					return u.pageLibrary(gtx)
-				case pgReports:
-					return u.pageReports(gtx)
-				case pgLog:
-					return u.pageLog(gtx)
-				case pgSettings:
-					return u.pageSettings(gtx)
-				}
-				return layout.Dimensions{}
+				return centerCap(gtx, 1180, func(gtx layout.Context) layout.Dimensions {
+					switch u.page {
+					case pgDash:
+						return u.pageDashboard(gtx)
+					case pgLive: // legacy: Live folded into Dashboard tabs (v1.8.8)
+						u.page = pgDash
+						if u.selProg != "" {
+							u.dashTab = u.selProg
+						}
+						return u.pageDashboard(gtx)
+					case pgMap:
+						return u.pageMap(gtx)
+					case pgLibrary:
+						return u.pageLibrary(gtx)
+					case pgReports:
+						return u.pageReports(gtx)
+					case pgLog:
+						return u.pageLog(gtx)
+					case pgSettings:
+						return u.pageSettings(gtx)
+					case pgSystem:
+						return u.pageSystem(gtx)
+					}
+					return layout.Dimensions{}
+				})
 			})
 		}),
 	)
+}
+
+// centerCap centres page content at a readable maximum width
+// (v1.8.12, user request): on a maximised window, cards, bars and
+// buttons used to stretch from edge to edge. Text pages now stop at
+// maxDp and sit in the middle; long text still gets the full capped
+// width when it genuinely needs it.
+func centerCap(gtx layout.Context, maxDp unit.Dp, w layout.Widget) layout.Dimensions {
+	avail := gtx.Constraints.Max.X
+	capPx := gtx.Dp(maxDp)
+	if avail <= capPx || avail <= 0 {
+		return w(gtx)
+	}
+	scale := gtx.Metric.PxPerDp
+	if scale <= 0 {
+		scale = 1
+	}
+	side := unit.Dp(float32((avail-capPx)/2) / scale)
+	return layout.Inset{Left: side, Right: side}.Layout(gtx, w)
+}
+
+// dropMenu is a small dropdown (v1.8.12): a content-sized button
+// showing the current choice; clicking opens the option list under
+// it, clicking an option picks it and closes. Only one menu is open
+// at a time (u.openMenu holds its key). onPick fires during layout,
+// exactly like button Clicked handling elsewhere in this UI.
+func (u *UI) dropMenu(gtx layout.Context, key, label string, options []string, selected int, onPick func(int)) layout.Dimensions {
+	open := u.openMenu == key
+	if u.tabRows.get("drop:" + key).Clicked(gtx) {
+		if open {
+			u.openMenu = ""
+		} else {
+			u.openMenu = key
+		}
+		open = u.openMenu == key
+	}
+	if open {
+		for i := range options {
+			if u.tabRows.get(fmt.Sprintf("drop:%s:%d", key, i)).Clicked(gtx) {
+				u.openMenu = ""
+				onPick(i)
+			}
+		}
+	}
+	children := []layout.FlexChild{
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			arrow := "▾"
+			if open {
+				arrow = "▴"
+			}
+			return u.btnGhost(u.tabRows.get("drop:"+key), label+"  "+arrow).Layout(gtx)
+		}),
+	}
+	if open {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if maxW := gtx.Dp(360); gtx.Constraints.Max.X > maxW {
+				gtx.Constraints.Max.X = maxW
+			}
+			rows := make([]layout.FlexChild, 0, len(options))
+			for i, opt := range options {
+				i, opt := i, opt
+				rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return material.Clickable(gtx, u.tabRows.get(fmt.Sprintf("drop:%s:%d", key, i)), func(gtx layout.Context) layout.Dimensions {
+						return pad(8, func(gtx layout.Context) layout.Dimensions {
+							mark, col := "○", colDim
+							if i == selected {
+								mark, col = "●", colCyan
+							}
+							return u.label(12.5, col, mark+"  "+opt).Layout(gtx)
+						})(gtx)
+					})
+				}))
+			}
+			return layout.Inset{Top: 4}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return bgFill(gtx, colPanel2, 8, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
+				})
+			})
+		}))
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
 }

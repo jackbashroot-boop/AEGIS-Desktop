@@ -97,7 +97,13 @@ func tileRangeFor(minLat, minLon, maxLat, maxLon float64, z int) (x0, y0, x1, y1
 
 // AreaTilePlan counts the tiles a save would need, per zoom.
 func AreaTilePlan(homeLat, homeLon float64) (total int, perZoom map[int]int) {
-	minLat, minLon, maxLat, maxLon := areaBounds(homeLat, homeLon, areaHalfMiles)
+	return AreaTilePlanR(homeLat, homeLon, areaHalfMiles)
+}
+
+// AreaTilePlanR is AreaTilePlan for a chosen half-size in miles
+// (v1.8.12: the user picks a 20x20, 50x50 or 100x100-mile square).
+func AreaTilePlanR(homeLat, homeLon, halfMiles float64) (total int, perZoom map[int]int) {
+	minLat, minLon, maxLat, maxLon := areaBounds(homeLat, homeLon, halfMiles)
 	perZoom = map[int]int{}
 	for z := areaMinZoom; z <= areaMaxZoom; z++ {
 		x0, y0, x1, y1 := tileRangeFor(minLat, minLon, maxLat, maxLon, z)
@@ -148,7 +154,12 @@ func (p *areaProgress) Cancel() { p.cancel.Store(true) }
 // Tiles already cached are counted without any network traffic, so
 // re-running after a cancel or a crash simply resumes.
 func (p *areaProgress) Start(root string, homeLat, homeLon float64, token string, onDone func()) {
-	total, _ := AreaTilePlan(homeLat, homeLon)
+	p.StartR(root, homeLat, homeLon, token, areaHalfMiles, onDone)
+}
+
+// StartR is Start for a chosen half-size in miles (v1.8.12).
+func (p *areaProgress) StartR(root string, homeLat, homeLon float64, token string, halfMiles float64, onDone func()) {
+	total, _ := AreaTilePlanR(homeLat, homeLon, halfMiles)
 	p.mu.Lock()
 	if p.running {
 		p.mu.Unlock()
@@ -175,7 +186,7 @@ func (p *areaProgress) Start(root string, homeLat, homeLon float64, token string
 				onDone()
 			}
 		}()
-		minLat, minLon, maxLat, maxLon := areaBounds(homeLat, homeLon, areaHalfMiles)
+		minLat, minLon, maxLat, maxLon := areaBounds(homeLat, homeLon, halfMiles)
 		type job struct{ z, x, y int }
 		jobs := make(chan job, 64)
 		var wg sync.WaitGroup
@@ -242,7 +253,7 @@ func (p *areaProgress) Start(root string, homeLat, homeLon float64, token string
 			}
 		}
 		a := OfflineArea{
-			HomeLat: homeLat, HomeLon: homeLon, HalfMiles: areaHalfMiles,
+			HomeLat: homeLat, HomeLon: homeLon, HalfMiles: halfMiles,
 			MinZoom: areaMinZoom, MaxZoom: areaMaxZoom,
 			Tiles: present, Bytes: TileCacheBytes(root),
 			SavedAt: time.Now().Format("2006-01-02 15:04"),
@@ -276,7 +287,15 @@ func (p *areaProgress) Start(root string, homeLat, homeLon float64, token string
 // cache - it never touches the network. Missing squares stay
 // transparent and the result is marked Partial.
 func buildTileSetCached(root string, d MapData, zoomDelta int, area OfflineArea) *tileSet {
-	minLat, minLon, maxLat, maxLon := mapBounds(d)
+	return buildTileSetCachedFB(root, d, zoomDelta, area, 0, 0, false)
+}
+
+func buildTileSetCachedFB(root string, d MapData, zoomDelta int, area OfflineArea, fbLat, fbLon float64, fbOK bool) *tileSet {
+	return buildTileSetCachedFBR(root, d, zoomDelta, area, fbLat, fbLon, fbOK, areaHalfMiles)
+}
+
+func buildTileSetCachedFBR(root string, d MapData, zoomDelta int, area OfflineArea, fbLat, fbLon float64, fbOK bool, halfMiles float64) *tileSet {
+	minLat, minLon, maxLat, maxLon := viewBoundsR(d, fbLat, fbLon, fbOK, halfMiles)
 	if !finite4(minLat, minLon, maxLat, maxLon) {
 		return &tileSet{Err: true}
 	}

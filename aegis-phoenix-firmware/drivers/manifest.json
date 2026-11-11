@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "program": "AEGIS PHOENIX",
+  "note": "Driver registry. Embedded drivers are compile-time (ESP32 has no loadable kernel modules); this manifest is the single source of truth the updater validates against board_config.h and platformio.ini. External 'driver packs' are data (rules/Atlas packs on SD), never code.",
+  "drivers": [
+    {"id":"wifi-sniffer","chip":"ESP32-S3 internal","bus":"radio","lib":"ESP32 Arduino WiFi (platform)","version":"espressif32 ^6.6.0","status":"builtin","file":"src/agent_core.h"},
+    {"id":"ble-nimble","chip":"ESP32-S3 internal","bus":"radio","lib":"h2zero/NimBLE-Arduino","version":"^2.1.0","status":"builtin","file":"src/agent_core.h"},
+    {"id":"lora-sx1262","chip":"SX1262 (Cap LoRa-1262)","bus":"SPI G40/G39/G14, NSS G5 RST G3 BUSY G6 DIO1 G4","lib":"jgromes/RadioLib","version":"^7.0.0","status":"optional-hat","file":"src/lora_hat.h"},
+    {"id":"gnss","chip":"GNSS Cap (NMEA)","bus":"UART RX G15 TX G13 @115200","lib":"none (in-tree parser)","version":"in-tree","status":"optional-hat","file":"src/gnss_hat.h"},
+    {"id":"esp32c5-companion","chip":"ESP32-C5 / XIAO ESP32C5","bus":"Grove UART RX G1 TX G2 @115200","lib":"companion firmware (arduino-cli, esp32 core 3.3.12)","version":"aegis-c5-companion","status":"optional-companion","file":"src/esp32c5_driver.h"},
+    {"id":"rfid2","chip":"WS1850S (RFID Unit 2)","bus":"I2C G8/G9 @0x28","lib":"none (in-tree)","version":"in-tree","status":"optional-unit","file":"src/rfid2.h"},
+    {"id":"ir-rx-external","chip":"3-pin IR receiver module","bus":"GPIO1 (conflicts with C5 UART)","lib":"none (in-tree RMT)","version":"in-tree","status":"optional-unit","file":"src/ir_remote.h"}
+  ],
+  "planned": [
+    {"id":"cc1101-subghz-rx","status":"later-receive-only"},
+    {"id":"pn532-nfc","status":"later-supersedes-rfid2"}
+  ]
+}

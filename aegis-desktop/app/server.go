@@ -515,6 +515,10 @@ func frameFromMsg(msg map[string]any, prog, ver string) Frame {
 	if v, ok := msgInt(msg, "gps_rej"); ok {
 		f.GPSRej, f.HasGPSR = clampCount(v), true
 	}
+	if v, ok := msgInt(msg, "csi"); ok {
+		f.CSI, f.HasCSI = clampCount(v), true
+		f.CSIMot = msgBool(msg, "csi_mot")
+	}
 	f.Charging = msgBool(msg, "chg")
 	return f
 }

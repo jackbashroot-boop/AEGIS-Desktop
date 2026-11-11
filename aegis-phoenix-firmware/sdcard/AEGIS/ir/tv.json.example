@@ -1,0 +1,13 @@
+{
+  "name": "Example TV - replace these codes",
+  "protocol": "NEC",
+  "buttons": {
+    "power":    { "address": "0x1234", "command": "0x11" },
+    "vol_up":   { "address": "0x1234", "command": "0x12" },
+    "vol_down": { "address": "0x1234", "command": "0x13" },
+    "ch_up":    { "address": "0x1234", "command": "0x14" },
+    "ch_down":  { "address": "0x1234", "command": "0x15" },
+    "mute":     { "address": "0x1234", "command": "0x16" },
+    "input":    { "address": "0x1234", "command": "0x17" }
+  }
+}

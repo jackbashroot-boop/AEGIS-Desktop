@@ -15,10 +15,10 @@ DESK = HOME / 'aegis-desktop'
 SRC = DESK / 'installer'
 BUILD = Path('/home/user/.suite-build')
 OUTDIR = HOME / 'DOWNLOADS/SUITE-Aegis-Family'
-COMP_ZIP = HOME / 'DOWNLOADS/COMPANION-Aegis-Desktop/Aegis-Companion-Desktop-v1.8.4.zip'
+COMP_ZIP = HOME / 'DOWNLOADS/COMPANION-Aegis-Desktop/Aegis-Companion-Desktop-v1.8.12.zip'
 
 PROGRAMS = [  # (folder, zip path, blurb) - TALON absent on purpose
-    ('PHOENIX', HOME/'DOWNLOADS/BLUE-Aegis-Phoenix/Aegis-Phoenix-v0.12.7-SD.zip'),
+    ('PHOENIX', HOME/'DOWNLOADS/BLUE-Aegis-Phoenix/Aegis-Phoenix-v0.12.15-SD.zip'),
     ('SCRIBE',  HOME/'DOWNLOADS/SCRIBE-Aegis-Scribe/Aegis-Scribe-v0.1.7-SD.zip'),
     ('HEARTH',  HOME/'DOWNLOADS/HEARTH-Aegis-Hearth/Aegis-Hearth-v0.1.7-SD.zip'),
     ('HERALD',  HOME/'DOWNLOADS/HERALD-Aegis-Herald/Aegis-Herald-v0.1.6-CYD.zip'),
@@ -50,7 +50,7 @@ def make_payload(osname, comp_member, comp_arc):
         p = stage / f['path']
         f['sha256'] = sha(p)
         f['size'] = p.stat().st_size
-    manifest = {'suite': '1.2.14', 'companion': '1.8.4',
+    manifest = {'suite': '1.2.24', 'companion': '1.8.12',
                 'programs': [p for p, _ in PROGRAMS], 'files': files}
     (stage / 'suite-manifest.json').write_text(json.dumps(manifest, indent=2))
     out = BUILD / f'payload-{osname}.zip'
@@ -62,7 +62,7 @@ def make_payload(osname, comp_member, comp_arc):
     return out
 
 def main():
-    go = '/home/user/.goroot/go/bin/go'
+    go = '/home/user/.goroot/bin/go'
     if not Path(go).exists():
         sys.exit('Go SDK missing at /tmp/gosdk (restore it first)')
     shutil.rmtree(BUILD, ignore_errors=True)
@@ -75,9 +75,9 @@ def main():
     shutil.copy(BUILD / 'payload-linux.zip', BUILD / 'src/payload-linux.zip')
     shutil.copy(BUILD / 'payload-windows.zip', BUILD / 'src/payload-windows.zip')
     OUTDIR.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, CGO_ENABLED='0', GOFLAGS='-mod=mod', GOTOOLCHAIN='go1.24.0', GOCACHE='/home/user/.gocache',
-               GOPATH='/home/user/.gopath', GOTMPDIR='/home/user/.gotmp')
-    Path('/home/user/.gotmp').mkdir(exist_ok=True)
+    env = dict(os.environ, CGO_ENABLED='0', GOFLAGS='-mod=mod', GOTOOLCHAIN='go1.24.0', GOCACHE='/home/user/.buildtmp/gocache',
+               GOPATH='/home/user/.buildtmp/gopath', GOTMPDIR='/home/user/.buildtmp/gotmp')
+    Path('/home/user/.buildtmp/gotmp').mkdir(parents=True, exist_ok=True)
     targets = [('linux', 'Aegis-Suite-Setup-Linux'), ('windows', 'Aegis-Suite-Setup-Windows.exe')]
     for goos, name in targets:
         e = dict(env, GOOS=goos, GOARCH='amd64')
@@ -85,7 +85,7 @@ def main():
                        cwd=BUILD / 'src', env=e, check=True)
         print('built', name, f'{(OUTDIR/name).stat().st_size/1e6:.1f} MB', sha(OUTDIR / name))
     # one-download bundle of both installers
-    bundle = HOME / 'DOWNLOADS/SUITE-Aegis-Family/Aegis-Family-Suite-v1.2.14.zip'
+    bundle = HOME / 'DOWNLOADS/SUITE-Aegis-Family/Aegis-Family-Suite-v1.2.24.zip'
     with zipfile.ZipFile(bundle, 'w', zipfile.ZIP_DEFLATED) as z:
         for _, name in targets:
             zi = zipfile.ZipInfo(name)

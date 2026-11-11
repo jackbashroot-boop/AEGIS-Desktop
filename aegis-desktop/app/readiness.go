@@ -7,6 +7,7 @@ package main
 // includes the device token, Wi-Fi passwords, or GitHub credentials.
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,7 @@ type readinessData struct {
 	Devices   []DeviceLive
 	Staged    fwFeedInfo
 	HasStaged bool
+	Manifests []string // SD library manifest summaries (v1.8.7)
 }
 
 func readinessBool(ok bool) string {
@@ -160,11 +162,57 @@ func buildReadinessReport(d readinessData) string {
 		}
 	}
 
+	b.WriteString("\nSD LIBRARY (device manifests)\n")
+	if len(d.Manifests) == 0 {
+		b.WriteString("- No device library manifest found yet. PHOENIX 0.12.10+ writes /AEGIS/data/library.json on the card and syncs it, so this section can prove what the card holds.\n")
+	}
+	for _, m := range d.Manifests {
+		fmt.Fprintf(&b, "- %s\n", m)
+	}
+	fmt.Fprintf(&b, "- Wi-Fi position estimates (no-GPS stretches placed from known networks): %d\n", len(d.Map.EstTrack))
+
 	b.WriteString("\nSAFETY / SECRETS\n")
 	b.WriteString("- This report contains no device token, Wi-Fi password, GitHub token, or private key.\n")
 	b.WriteString("- Firmware updates remain consent-gated: nothing flashes until ENTER is pressed on the Cardputer.\n")
 	b.WriteString("- Location values are estimates. The ± radius is part of the result; a pin without a radius should not be treated as exact.\n")
 	return b.String()
+}
+
+// scanLibraryManifests summarises any device library.json files
+// synced into the library (v1.8.7 SD handoff manifests).
+func scanLibraryManifests(root string) []string {
+	var out []string
+	_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() || info.Name() != "library.json" || len(out) >= 6 {
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		var m struct {
+			Prog  string `json:"prog"`
+			FW    string `json:"fw"`
+			Files []struct {
+				Name  string `json:"name"`
+				Bytes int64  `json:"bytes"`
+			} `json:"files"`
+		}
+		if json.Unmarshal(raw, &m) != nil || m.Prog == "" {
+			return nil
+		}
+		var total int64
+		for _, f := range m.Files {
+			total += f.Bytes
+		}
+		day := dayOf(root, path)
+		if day == "" {
+			day = "?"
+		}
+		out = append(out, fmt.Sprintf("%s fw %s (synced %s): %d files, %s on card", m.Prog, m.FW, day, len(m.Files), humanBytes(total)))
+		return nil
+	})
+	return out
 }
 
 // WriteReadinessReport saves the report under Library/Reports and

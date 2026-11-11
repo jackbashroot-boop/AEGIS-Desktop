@@ -42,8 +42,75 @@ func (u *UI) mapEnsure() MapData {
 	return *u.mapData
 }
 
+// mapFallbackCenter is where the map centres when there is no
+// sighting data yet (v1.8.5): Settings home first, then the saved
+// home-map's centre. ok=false when data exists (no fallback needed)
+// or no centre is known at all.
+func (u *UI) mapFallbackCenter(d MapData) (float64, float64, bool) {
+	if len(d.Points) > 0 || len(d.Track) > 0 {
+		return 0, 0, false
+	}
+	if u.core.Cfg.HomeLat != 0 || u.core.Cfg.HomeLon != 0 {
+		return u.core.Cfg.HomeLat, u.core.Cfg.HomeLon, true
+	}
+	if a, ok := u.offlineArea(u.core.Cfg.Library); ok && (a.HomeLat != 0 || a.HomeLon != 0) {
+		return a.HomeLat, a.HomeLon, true
+	}
+	// Last resort (v1.8.6): no home anywhere yet - still show a real
+	// map (wide US view) instead of an empty box. mapCentreIsHome
+	// keeps the HOME marker honest; the banner tells you to set home.
+	return 39.8, -98.6, true
+}
+
+// mapCentreIsHome reports whether the empty-map centre is the
+// user's actual home (vs the wide last-resort view).
+func (u *UI) mapCentreIsHome(d MapData) bool {
+	if len(d.Points) > 0 || len(d.Track) > 0 {
+		return false
+	}
+	if u.core.Cfg.HomeLat != 0 || u.core.Cfg.HomeLon != 0 {
+		return true
+	}
+	if a, ok := u.offlineArea(u.core.Cfg.Library); ok && (a.HomeLat != 0 || a.HomeLon != 0) {
+		return true
+	}
+	return false
+}
+
+// mapHalfMiles is the framing half-size for the home map: the
+// saved area's own size when one exists, else the chosen size.
+func (u *UI) mapHalfMiles() float64 {
+	if a, ok := u.offlineArea(u.core.Cfg.Library); ok && a.HalfMiles > 0 {
+		return a.HalfMiles
+	}
+	return u.core.Cfg.homeHalfMiles()
+}
+
+// drawHomeMark paints the amber HOME marker at a projected point,
+// skipping quietly when home projects off-canvas.
+func (u *UI) drawHomeMark(gtx layout.Context, hp f32.Point, w, h int) {
+	if hp.X < -24 || hp.Y < -24 || hp.X > float32(w)+24 || hp.Y > float32(h)+24 {
+		return
+	}
+	hr := 7
+	paint.FillShape(gtx.Ops, colAmber, clip.Ellipse{
+		Min: image.Pt(int(hp.X)-hr, int(hp.Y)-hr),
+		Max: image.Pt(int(hp.X)+hr, int(hp.Y)+hr),
+	}.Op(gtx.Ops))
+	ring := clip.Ellipse{
+		Min: image.Pt(int(hp.X)-hr-4, int(hp.Y)-hr-4),
+		Max: image.Pt(int(hp.X)+hr+4, int(hp.Y)+hr+4),
+	}
+	paint.FillShape(gtx.Ops, colAmber, clip.Stroke{Path: ring.Path(gtx.Ops), Width: 1.8}.Op())
+	func() {
+		defer op.Offset(image.Pt(int(hp.X)+14, int(hp.Y)-8)).Push(gtx.Ops).Pop()
+		u.bold(11, colAmber, "HOME").Layout(gtx)
+	}()
+}
+
 func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 	d := u.mapEnsure()
+	fbLat, fbLon, fbOK := u.mapFallbackCenter(d)
 
 	if u.btnMapRefresh.Clicked(gtx) {
 		u.mapData = nil
@@ -58,16 +125,35 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 	if u.btnZoomOut.Clicked(gtx) && u.mapZoom > -2 {
 		u.mapZoom--
 	}
-	if u.btnMapWeb.Clicked(gtx) && len(d.Points) > 0 {
-		if path, err := WriteMapHTML(u.core.Store.Root(), d); err == nil {
+	if u.btnMapWeb.Clicked(gtx) && (len(d.Points) > 0 || fbOK) {
+		dd := d
+		if len(dd.Points) == 0 && fbOK {
+			dd.CenterLat, dd.CenterLon = fbLat, fbLon
+		}
+		if path, err := WriteMapHTML(u.core.Store.Root(), dd); err == nil {
 			openPath(path)
 			u.core.Log.Infof("wardrive map written: %s", path)
 		} else {
 			u.core.Log.Errorf("wardrive map: %v", err)
 		}
 	}
-	if u.btnMapGMaps.Clicked(gtx) && len(d.Points) > 0 {
-		openPath(GoogleMapsURL(d.CenterLat, d.CenterLon))
+	if u.btnMapGMaps.Clicked(gtx) && (len(d.Points) > 0 || fbOK) {
+		clat, clon := d.CenterLat, d.CenterLon
+		if len(d.Points) == 0 && fbOK {
+			clat, clon = fbLat, fbLon
+		}
+		openPath(GoogleMapsURL(clat, clon))
+	}
+	if u.btnMapShare.Clicked(gtx) {
+		if len(d.Points) == 0 {
+			u.mapMsg = "Nothing to share yet - wardrive first, then export."
+		} else if dir, err := WriteShareExports(u.core.Store.Root(), d); err == nil {
+			u.mapMsg = "Shared to " + dir + " (GPX + GeoJSON + CSV - open in Meshtastic / MeshCore tools or any map app)."
+			openPath(dir)
+		} else {
+			u.mapMsg = "Share export failed: " + err.Error()
+			u.core.Log.Errorf("share export: %v", err)
+		}
 	}
 	if u.btnSavedOnly.Clicked(gtx) {
 		u.savedOnly = !u.savedOnly
@@ -83,10 +169,10 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 	if u.btnSaveArea.Clicked(gtx) {
 		cfg := u.core.Cfg
 		if cfg.HomeLat == 0 && cfg.HomeLon == 0 {
-			u.mapMsg = "First set your home location in Settings > Wardrive map - the saved map is a 100x100-mile square around it."
+			u.mapMsg = "First set your home location in Settings > Wardrive map - the saved map is a " + cfg.areaSizeLabel() + " square around it."
 		} else {
 			root := cfg.Library
-			u.areaProg.Start(root, cfg.HomeLat, cfg.HomeLon, cfg.Token, func() {
+			u.areaProg.StartR(root, cfg.HomeLat, cfg.HomeLon, cfg.Token, cfg.homeHalfMiles(), func() {
 				u.tiles, u.tilesBusy = nil, ""
 			})
 		}
@@ -95,23 +181,10 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 		u.areaProg.Cancel()
 	}
 
-	if len(d.Points) == 0 && len(d.Track) == 0 {
-		return bgFill(gtx, colPanel, 10, pad(16, func(gtx layout.Context) layout.Dimensions {
-			return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return u.bold(14, colText, "No GPS-tagged wardrive data yet").Layout(gtx)
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return u.label(12.5, colDim, "Wardriving with PHOENIX tags every network with the GPS position where its signal was strongest - that needs a GNSS fix (the Cap LoRa-1262's GPS, outdoors with sky view). When the Cardputer comes home it syncs wifi_map.geojson / wardrive.jsonl automatically, and this page turns them into a map: where you walked, and where each signal was found. You can also drop an SD card in via Library -> Import. Sightings recorded without a fix are counted below the map once some exist.").Layout(gtx)
-				}),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 10) }),
-				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return u.btnGhost(&u.btnMapRefresh, "Refresh").Layout(gtx)
-				}),
-			)
-		}))
-	}
+	// v1.8.5: no data no longer replaces the page with an empty panel.
+	// The full map (home area, 100x100 miles) renders underneath and
+	// sightings decorate it as they arrive.
+	emptyData := len(d.Points) == 0 && len(d.Track) == 0
 
 	stats := []struct {
 		title, value string
@@ -121,6 +194,7 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 		{"ROUTE POINTS", fmt.Sprint(len(d.Track)), colCyan},
 		{"ROUTE LENGTH", fmt.Sprintf("%.2f km", d.RouteKm), colCyan},
 		{"SIGHTINGS WITHOUT GPS", fmt.Sprint(d.NoGPS), colAmber},
+		{"WI-FI POSITION EST.", fmt.Sprint(len(d.EstTrack)), colAmber},
 		{"MAP FILES READ", fmt.Sprint(d.Files), colCyan},
 	}
 
@@ -163,6 +237,20 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 			}
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, children...)
 		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if !emptyData {
+				return vSpace(gtx, 12)
+			}
+			return layout.Inset{Top: 12}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return bgFill(gtx, colPanel, 10, pad(12, func(gtx layout.Context) layout.Dimensions {
+					msg := "No GPS-tagged sightings yet — below is your full home map (the whole " + u.core.Cfg.areaSizeLabel() + " area). Wardrive with PHOENIX outdoors (GNSS fix, sky view), come home, and pins + your route land on this same map automatically after sync. You can also drop an SD card in via Library → Import."
+					if !u.mapCentreIsHome(d) {
+						msg = "No GPS-tagged sightings yet, and no home location is set — showing a wide map for now. Set home in Settings → Wardrive map and this page centres on your full " + u.core.Cfg.areaSizeLabel() + " home map even before the first drive."
+					}
+					return u.label(12, colDim, msg).Layout(gtx)
+				}))
+			})
+		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 12) }),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			if u.mapReal {
@@ -195,6 +283,10 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return hSpace(8)(gtx) }),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return u.btnGhost(&u.btnMapGMaps, "Center in Google Maps").Layout(gtx)
+				}),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return hSpace(8)(gtx) }),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.btnGhost(&u.btnMapShare, "Share (Meshtastic/MeshCore)").Layout(gtx)
 				}),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions { return hSpace(8)(gtx) }),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -298,7 +390,8 @@ func (u *UI) pageMap(gtx layout.Context) layout.Dimensions {
 }
 
 func (u *UI) tileKeyFor(d MapData) string {
-	minLat, minLon, maxLat, maxLon := mapBounds(d)
+	fbLat, fbLon, fbOK := u.mapFallbackCenter(d)
+	minLat, minLon, maxLat, maxLon := viewBoundsR(d, fbLat, fbLon, fbOK, u.mapHalfMiles())
 	return fmt.Sprintf("%.4f,%.4f,%.4f,%.4f,z%d", minLat, minLon, maxLat, maxLon, u.mapZoom)
 }
 
@@ -320,12 +413,13 @@ func (u *UI) mapPlotAuto(gtx layout.Context, d MapData) layout.Dimensions {
 			u.tiles = &tileSet{Key: key, Loading: true}
 			root := u.core.Store.Root()
 			dd, zd := d, u.mapZoom
+			fLat, fLon, fOK := u.mapFallbackCenter(dd)
 			go func() {
 				var ts *tileSet
 				if offline {
-					ts = buildTileSetCached(root, dd, zd, area)
+					ts = buildTileSetCachedFBR(root, dd, zd, area, fLat, fLon, fOK, u.mapHalfMiles())
 				} else {
-					ts = buildTileSet(root, dd, zd)
+					ts = buildTileSetFBR(root, dd, zd, fLat, fLon, fOK, u.mapHalfMiles())
 				}
 				ts.Key = key
 				u.tiles = ts
@@ -371,17 +465,57 @@ func (u *UI) mapPlotReal(gtx layout.Context, d MapData, ts *tileSet) layout.Dime
 		iy := latToWorldY(lat, ts.Zoom) - ts.OriginY
 		return f32.Pt(float32((ix-iw/2)*s+float64(w)/2), float32((iy-ih/2)*s+float64(h)/2))
 	}
+	// Empty drive, full map (v1.8.5): mark HOME at the centre of the
+	// home view so the page reads as a place, not a void.
+	if fbLat, fbLon, fbOK := u.mapFallbackCenter(d); fbOK {
+		u.drawHomeMark(gtx, proj(fbLat, fbLon), w, h)
+	}
+	// With sightings on the map, home still gets its marker when it
+	// is set (v1.8.12 - it used to vanish the moment data existed,
+	// which read as "the map lost my location").
+	if (len(d.Points) > 0 || len(d.Track) > 0) && (u.core.Cfg.HomeLat != 0 || u.core.Cfg.HomeLon != 0) {
+		u.drawHomeMark(gtx, proj(u.core.Cfg.HomeLat, u.core.Cfg.HomeLon), w, h)
+	}
 	if len(d.Track) > 1 {
 		var path clip.Path
 		path.Begin(gtx.Ops)
+		trackBreaks := segBreaks(d.TrackSeg)
+		var prevTp [2]float64
+		havePrev := false
 		for i, tp := range d.Track {
-			if i == 0 {
+			if !validLatLon(tp[0], tp[1]) {
+				continue
+			}
+			// Lift the pen at file/day breaks and >3 km jumps
+			// (v1.8.12): drives are segments, not one glued line.
+			if !havePrev || trackBreaks[i] || distanceM(prevTp[0], prevTp[1], tp[0], tp[1]) > 3000 {
 				path.MoveTo(proj(tp[0], tp[1]))
 			} else {
 				path.LineTo(proj(tp[0], tp[1]))
 			}
+			prevTp, havePrev = tp, true
 		}
 		paint.FillShape(gtx.Ops, colCyan, clip.Stroke{Path: path.End(), Width: 2.4}.Op())
+	}
+	// Wi-Fi position estimates: amber (v1.8.7).
+	if len(d.EstTrack) > 1 {
+		var path clip.Path
+		path.Begin(gtx.Ops)
+		estBreaks := segBreaks(d.EstSeg)
+		var prevEt [2]float64
+		havePrevEt := false
+		for i, tp := range d.EstTrack {
+			if !validLatLon(tp[0], tp[1]) {
+				continue
+			}
+			if !havePrevEt || estBreaks[i] || distanceM(prevEt[0], prevEt[1], tp[0], tp[1]) > 3000 {
+				path.MoveTo(proj(tp[0], tp[1]))
+			} else {
+				path.LineTo(proj(tp[0], tp[1]))
+			}
+			prevEt, havePrevEt = tp, true
+		}
+		paint.FillShape(gtx.Ops, colAmber, clip.Stroke{Path: path.End(), Width: 1.8}.Op())
 	}
 	for i := len(d.Points) - 1; i >= 0; i-- {
 		p := d.Points[i]
@@ -423,21 +557,23 @@ func (u *UI) mapPlot(gtx layout.Context, d MapData) layout.Dimensions {
 	}
 	sz := image.Pt(w, h)
 
-	// bounds over points + track
-	minLat, maxLat := math.Inf(1), math.Inf(-1)
-	minLon, maxLon := math.Inf(1), math.Inf(-1)
-	grow := func(lat, lon float64) {
-		minLat, maxLat = math.Min(minLat, lat), math.Max(maxLat, lat)
-		minLon, maxLon = math.Min(minLon, lon), math.Max(maxLon, lon)
-	}
-	for _, p := range d.Points {
-		grow(p.Lat, p.Lon)
-	}
-	for _, tp := range d.Track {
-		grow(tp[0], tp[1])
-	}
-	if math.IsInf(minLat, 1) {
-		return layout.Dimensions{Size: sz}
+	// bounds over points + track (robustly trimmed, v1.8.12: one
+	// far-flung bad fix no longer stretches the frame)
+	minLat, minLon, maxLat, maxLon, hasFrame := frameBounds(d)
+	homeView := false
+	var homeLat, homeLon float64
+	if !hasFrame {
+		// No sightings: frame the full 100x100-mile home map instead
+		// of an empty box (v1.8.5).
+		fbLat, fbLon, fbOK := u.mapFallbackCenter(d)
+		if !fbOK {
+			paint.FillShape(gtx.Ops, colPanel, clip.RRect{
+				Rect: image.Rectangle{Max: sz}, NW: 10, NE: 10, SE: 10, SW: 10,
+			}.Op(gtx.Ops))
+			return layout.Dimensions{Size: sz}
+		}
+		minLat, minLon, maxLat, maxLon = areaBounds(fbLat, fbLon, u.mapHalfMiles())
+		homeView, homeLat, homeLon = true, fbLat, fbLon
 	}
 	// pad 10% and guard degenerate (single point) bounds
 	padLat := math.Max((maxLat-minLat)*0.1, 0.002)
@@ -464,14 +600,43 @@ func (u *UI) mapPlot(gtx layout.Context, d MapData) layout.Dimensions {
 	if len(d.Track) > 1 {
 		var path clip.Path
 		path.Begin(gtx.Ops)
+		trackBreaks := segBreaks(d.TrackSeg)
+		var prevTp [2]float64
+		havePrev := false
 		for i, tp := range d.Track {
-			if i == 0 {
+			if !validLatLon(tp[0], tp[1]) {
+				continue
+			}
+			// Lift the pen at file/day breaks and >3 km jumps
+			// (v1.8.12): drives are segments, not one glued line.
+			if !havePrev || trackBreaks[i] || distanceM(prevTp[0], prevTp[1], tp[0], tp[1]) > 3000 {
 				path.MoveTo(proj(tp[0], tp[1]))
 			} else {
 				path.LineTo(proj(tp[0], tp[1]))
 			}
+			prevTp, havePrev = tp, true
 		}
 		paint.FillShape(gtx.Ops, colCyan, clip.Stroke{Path: path.End(), Width: 2}.Op())
+	}
+	// Wi-Fi position estimates (v1.8.7): amber, under the pins.
+	if len(d.EstTrack) > 1 {
+		var path clip.Path
+		path.Begin(gtx.Ops)
+		estBreaks := segBreaks(d.EstSeg)
+		var prevEt [2]float64
+		havePrevEt := false
+		for i, tp := range d.EstTrack {
+			if !validLatLon(tp[0], tp[1]) {
+				continue
+			}
+			if !havePrevEt || estBreaks[i] || distanceM(prevEt[0], prevEt[1], tp[0], tp[1]) > 3000 {
+				path.MoveTo(proj(tp[0], tp[1]))
+			} else {
+				path.LineTo(proj(tp[0], tp[1]))
+			}
+			prevEt, havePrevEt = tp, true
+		}
+		paint.FillShape(gtx.Ops, colAmber, clip.Stroke{Path: path.End(), Width: 1.6}.Op())
 	}
 	// points (weakest first so strongest sit on top)
 	for i := len(d.Points) - 1; i >= 0; i-- {
@@ -494,6 +659,32 @@ func (u *UI) mapPlot(gtx layout.Context, d MapData) layout.Dimensions {
 			paint.FillShape(gtx.Ops, colText, clip.Stroke{Path: ring.Path(gtx.Ops), Width: 1.6}.Op())
 		}
 	}
+	// HOME marker on the empty full-map view (v1.8.5; only when the
+	// centre really is home - never on the wide last-resort view)
+	if homeView && u.mapCentreIsHome(d) {
+		hp := proj(homeLat, homeLon)
+		hr := 7
+		paint.FillShape(gtx.Ops, colAmber, clip.Ellipse{
+			Min: image.Pt(int(hp.X)-hr, int(hp.Y)-hr),
+			Max: image.Pt(int(hp.X)+hr, int(hp.Y)+hr),
+		}.Op(gtx.Ops))
+		ring := clip.Ellipse{
+			Min: image.Pt(int(hp.X)-hr-4, int(hp.Y)-hr-4),
+			Max: image.Pt(int(hp.X)+hr+4, int(hp.Y)+hr+4),
+		}
+		paint.FillShape(gtx.Ops, colAmber, clip.Stroke{Path: ring.Path(gtx.Ops), Width: 1.8}.Op())
+		func() {
+			defer op.Offset(image.Pt(int(hp.X)+14, int(hp.Y)-8)).Push(gtx.Ops).Pop()
+			u.bold(11, colAmber, "HOME").Layout(gtx)
+		}()
+		func() {
+			defer op.Offset(image.Pt(10, h-20)).Push(gtx.Ops).Pop()
+			u.label(10.5, colDim, "Full "+u.core.Cfg.areaSizeLabel()+" home map — no sightings here yet").Layout(gtx)
+		}()
+	}
+	if !homeView && (u.core.Cfg.HomeLat != 0 || u.core.Cfg.HomeLon != 0) {
+		u.drawHomeMark(gtx, proj(u.core.Cfg.HomeLat, u.core.Cfg.HomeLon), w, h)
+	}
 	// corner labels
 	u.label(10.5, colFaint, fmt.Sprintf("%.4f, %.4f", maxLat, minLon)).Layout(
 		gtx)
@@ -511,7 +702,7 @@ func (u *UI) mapAreaStrip(gtx layout.Context) layout.Dimensions {
 			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.bold(12.5, colText, "Saved home map (100x100 miles)").Layout(gtx)
+						return u.bold(12.5, colText, "Saved home map ("+u.core.Cfg.areaSizeLabel()+")").Layout(gtx)
 					}),
 					layout.Rigid(hSpace(10)),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
@@ -553,7 +744,7 @@ func (u *UI) mapAreaStrip(gtx layout.Context) layout.Dimensions {
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-							label := "Save home map (100x100 mi)"
+							label := "Save home map (" + u.core.Cfg.areaSizeLabel() + ")"
 							if hasArea {
 								label = "Re-save / fill gaps"
 							}

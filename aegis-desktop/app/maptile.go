@@ -121,8 +121,42 @@ func finite4(a, b, c, dd float64) bool {
 	return true
 }
 
+// viewBounds returns the extent the map should frame: the data's own
+// bounds when there is any, otherwise the full 100x100-mile home-map
+// square around the fallback centre (v1.8.5 - an empty drive used to
+// leave the map blank and depressing; the map is the map, sightings
+// just decorate it). fbOK=false means no fallback is known.
+func viewBounds(d MapData, fbLat, fbLon float64, fbOK bool) (minLat, minLon, maxLat, maxLon float64) {
+	return viewBoundsR(d, fbLat, fbLon, fbOK, areaHalfMiles)
+}
+
+// viewBoundsR frames the empty map at the chosen saved-map size
+// (v1.8.12) instead of always the historic 100x100 miles.
+func viewBoundsR(d MapData, fbLat, fbLon float64, fbOK bool, halfMiles float64) (minLat, minLon, maxLat, maxLon float64) {
+	minLat, minLon, maxLat, maxLon = mapBounds(d)
+	if finite4(minLat, minLon, maxLat, maxLon) {
+		return minLat, minLon, maxLat, maxLon
+	}
+	if fbOK {
+		return areaBounds(fbLat, fbLon, halfMiles)
+	}
+	return minLat, minLon, maxLat, maxLon
+}
+
 func buildTileSet(root string, d MapData, zoomDelta int) *tileSet {
-	minLat, minLon, maxLat, maxLon := mapBounds(d)
+	return buildTileSetFB(root, d, zoomDelta, 0, 0, false)
+}
+
+func buildTileSetFBR(root string, d MapData, zoomDelta int, fbLat, fbLon float64, fbOK bool, halfMiles float64) *tileSet {
+	return buildTileSetHalf(root, d, zoomDelta, fbLat, fbLon, fbOK, halfMiles)
+}
+
+func buildTileSetFB(root string, d MapData, zoomDelta int, fbLat, fbLon float64, fbOK bool) *tileSet {
+	return buildTileSetHalf(root, d, zoomDelta, fbLat, fbLon, fbOK, areaHalfMiles)
+}
+
+func buildTileSetHalf(root string, d MapData, zoomDelta int, fbLat, fbLon float64, fbOK bool, halfMiles float64) *tileSet {
+	minLat, minLon, maxLat, maxLon := viewBoundsR(d, fbLat, fbLon, fbOK, halfMiles)
 	if !finite4(minLat, minLon, maxLat, maxLon) {
 		return &tileSet{Err: true}
 	}
@@ -183,22 +217,14 @@ func buildTileSet(root string, d MapData, zoomDelta int) *tileSet {
 	}
 }
 
-// mapBounds returns the lat/lon extent of points+track (valid, non-empty
-// when called - the page checks first).
+// mapBounds returns the lat/lon extent of points+track, robustly
+// trimmed (v1.8.12 - see frameBounds): valid, non-empty when the
+// caller checked data exists; infinite corners otherwise.
 func mapBounds(d MapData) (minLat, minLon, maxLat, maxLon float64) {
-	minLat, minLon = math.Inf(1), math.Inf(1)
-	maxLat, maxLon = math.Inf(-1), math.Inf(-1)
-	grow := func(lat, lon float64) {
-		minLat, maxLat = math.Min(minLat, lat), math.Max(maxLat, lat)
-		minLon, maxLon = math.Min(minLon, lon), math.Max(maxLon, lon)
+	if a, b, c, e, ok := frameBounds(d); ok {
+		return a, b, c, e
 	}
-	for _, p := range d.Points {
-		grow(p.Lat, p.Lon)
-	}
-	for _, tp := range d.Track {
-		grow(tp[0], tp[1])
-	}
-	return minLat, minLon, maxLat, maxLon
+	return math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
 }
 
 // TileCacheBytes reports the on-disk tile cache size for Settings.

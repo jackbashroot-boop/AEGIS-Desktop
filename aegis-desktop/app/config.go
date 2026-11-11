@@ -34,12 +34,40 @@ type Config struct {
 	MinToTray     bool    `json:"min_to_tray,omitempty"`     // close = hide to system tray (v1.8.1)
 	HomeSSID      string  `json:"home_ssid,omitempty"`       // PC presence: your home Wi-Fi name (v1.8.3)
 	HomeDevices   string  `json:"home_devices,omitempty"`    // PC presence: "Name=MAC" lines (v1.8.3)
+	HomeRadiusMi  int     `json:"home_radius_mi,omitempty"`  // saved home-map size: 20/50/100 miles across (v1.8.12; 0 = 100)
+	LocationAsked bool    `json:"location_asked,omitempty"`  // PC-location consent answered - never nag twice (v1.8.12)
+}
+
+// homeHalfMiles is half the chosen saved-map size (the downloader
+// works in half-size). Default preserves the historic 100x100 miles.
+func (c *Config) homeHalfMiles() float64 {
+	switch c.HomeRadiusMi {
+	case 20:
+		return 10
+	case 50:
+		return 25
+	default:
+		return 50
+	}
+}
+
+// areaSizeLabel is the user-facing "100x100 miles" text for the
+// currently chosen saved-map size.
+func (c *Config) areaSizeLabel() string {
+	switch c.HomeRadiusMi {
+	case 20:
+		return "20x20 miles"
+	case 50:
+		return "50x50 miles"
+	default:
+		return "100x100 miles"
+	}
 }
 
 const (
 	defaultPort    = 8791
 	configFileName = "aegis-companion.json"
-	appVersion     = "1.8.4"
+	appVersion     = "1.8.12"
 )
 
 // exeDir is the folder the program lives in. Config, Library and logs sit
@@ -103,11 +131,17 @@ func (c *Config) Save() error {
 		return err
 	}
 	p := configPath()
-	if err := os.WriteFile(p, data, 0o600); err != nil {
+	// Atomic (v1.8.9): write temp + rename, so a power cut mid-save
+	// can never leave a half-written settings file.
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	// os.WriteFile honours umask on first create; tighten explicitly.
+	if err := os.Rename(tmp, p); err != nil {
+		return err
+	}
 	_ = os.Chmod(p, 0o600)
+	backupConfigCopy() // rotating snapshots beside the program
 	return nil
 }
 

@@ -1,7 +1,29 @@
 ====================================================================
-  AEGIS COMPANION v1.7.9 - desktop program for Linux + Windows
+  AEGIS COMPANION v1.8.2 - desktop program for Linux + Windows
   The full-UI rewrite (native, no Python needed). Protocol AEGIS/1.
 ====================================================================
+
+WHAT'S NEW IN 1.8.2
+- One-click sync: Dashboard's Updates panel checks BOTH the
+  Companion and PHOENIX feeds. "Update everything" downloads the
+  newest PHOENIX here (SHA-256 verified), then offers it to each
+  live Cardputer - it pulls the image over your Wi-Fi only after
+  ENTER is pressed on the device, verifies, and flashes itself.
+  Each device card also grows a "Send update" button.
+
+WHAT'S NEW IN 1.8.1
+- System tray: Settings > Dashboard window adds "Minimize to
+  system tray when the window closes". Devices stay linked and
+  updates keep checking; right-click the tray icon for Open
+  Dashboard or Quit. Off = close quits, as before.
+
+WHAT'S NEW IN 1.8.0
+- Home location by ZIP CODE: Settings > Wardrive map now takes a
+  US ZIP (one internet lookup) OR latitude/longitude - your choice.
+  The resolved place + coordinates are saved for the offline map.
+- AEGIS_LINK host address is now chosen on your devices' network
+  (Wi-Fi and found-device subnet win over wired/VPN/Docker), ending
+  the wrong-subnet link files on multi-network PCs.
 
 WHAT'S NEW IN 1.7.9
   * ACTIVE PING DISCOVERY (user request): the Companion now

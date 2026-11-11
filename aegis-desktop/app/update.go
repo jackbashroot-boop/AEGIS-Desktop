@@ -41,8 +41,16 @@ import (
 
 type updateLatest struct {
 	Version string `json:"version"`
-	File    string `json:"file"`
-	Notes   string `json:"notes"`
+	// Companion/Suite (v1.8.10): the suite-era feeds (v1.2.15-1.2.21)
+	// put the SUITE version (1.2.x) in "version", which always sorts
+	// BELOW the Companion's own 1.8.x - every Companion concluded
+	// "up to date" forever. Feeds now carry the Companion version in
+	// "version" AND "companion", with "suite" for display. effVersion
+	// prefers "companion" so both feed eras resolve correctly.
+	Companion string `json:"companion"`
+	Suite     string `json:"suite"`
+	File      string `json:"file"`
+	Notes     string `json:"notes"`
 	// URL (optional) is the direct installer download; when empty the
 	// installer is fetched next to the feed's latest.json. SHA256
 	// (required for downloads) is verified before anything runs.
@@ -59,22 +67,52 @@ type updateLatest struct {
 	// (Before v1.7.9 the parser only knew the flat fields above,
 	// so a check could SAY an update existed while Install always
 	// failed with "names no installer file" - found in the audit.)
-	Files map[string]struct {
-		Name   string `json:"name"`
-		SHA256 string `json:"sha256"`
-		Size   int64  `json:"size"`
-	} `json:"files"`
+	Files map[string]feedEntry `json:"files"`
+	// Top-level per-OS objects (another emitted shape, v1.2.15+).
+	Linux   feedEntry `json:"linux"`
+	Windows feedEntry `json:"windows"`
+}
+
+// feedEntry is one OS's installer entry. "name" is the canonical key;
+// "file" was emitted by the suite-era generator - accept both.
+type feedEntry struct {
+	Name   string `json:"name"`
+	File   string `json:"file"`
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+
+func (e feedEntry) fileName() string {
+	if e.Name != "" {
+		return e.Name
+	}
+	return e.File
+}
+
+// effVersion is the Companion version this feed offers.
+func (l updateLatest) effVersion() string {
+	if l.Companion != "" {
+		return l.Companion
+	}
+	return l.Version
 }
 
 func (l updateLatest) osEntry() (name, sha string, size int64, ok bool) {
+	key := "linux"
+	if runtime.GOOS == "windows" {
+		key = "windows"
+	}
 	if l.Files != nil {
-		key := "linux"
-		if runtime.GOOS == "windows" {
-			key = "windows"
+		if e, hit := l.Files[key]; hit && e.fileName() != "" {
+			return e.fileName(), e.SHA256, e.Size, true
 		}
-		if e, hit := l.Files[key]; hit && e.Name != "" {
-			return e.Name, e.SHA256, e.Size, true
-		}
+	}
+	e := l.Linux
+	if runtime.GOOS == "windows" {
+		e = l.Windows
+	}
+	if e.fileName() != "" {
+		return e.fileName(), e.SHA256, e.Size, true
 	}
 	return "", "", 0, false
 }
@@ -160,8 +198,8 @@ func findUpdate() (updateLatest, string, error) {
 	if err := json.Unmarshal(raw, &latest); err != nil {
 		return updateLatest{}, "", fmt.Errorf("latest.json is not readable: %w", err)
 	}
-	if _, ok := parseVersion(latest.Version); !ok {
-		return updateLatest{}, "", fmt.Errorf("latest.json version %q is not x.y.z", latest.Version)
+	if _, ok := parseVersion(latest.effVersion()); !ok {
+		return updateLatest{}, "", fmt.Errorf("latest.json version %q is not x.y.z", latest.effVersion())
 	}
 	ef := latest.effectiveFile()
 	if ef == "" {
@@ -314,8 +352,8 @@ func fetchLatest(cfg *Config) (updateLatest, error) {
 	if err := json.Unmarshal(raw, &latest); err != nil {
 		return updateLatest{}, fmt.Errorf("the feed's latest.json is not readable: %w", err)
 	}
-	if _, ok := parseVersion(latest.Version); !ok {
-		return updateLatest{}, fmt.Errorf("the feed's latest.json version %q is not x.y.z", latest.Version)
+	if _, ok := parseVersion(latest.effVersion()); !ok {
+		return updateLatest{}, fmt.Errorf("the feed's latest.json version %q is not x.y.z", latest.effVersion())
 	}
 	if ef := latest.effectiveFile(); ef != "" && filepath.Base(ef) != ef {
 		return updateLatest{}, fmt.Errorf("the feed's latest.json file %q must be a plain file name", ef)
@@ -365,8 +403,8 @@ func startUpdateCheck(cfg *Config) {
 				}
 			})
 		}
-		if latest, p, err := findUpdate(); err == nil && p != "" && versionNewer(latest.Version, appVersion) {
-			finish(fmt.Sprintf("Update v%s is already downloaded and staged in the Updates folder - click Install update to run it.", latest.Version),
+		if latest, p, err := findUpdate(); err == nil && p != "" && versionNewer(latest.effVersion(), appVersion) {
+			finish(fmt.Sprintf("Update v%s is already downloaded and staged in the Updates folder - click Install update to run it.", latest.effVersion()),
 				func(st *updateState) { st.stagedPath, st.latest = p, latest })
 			return
 		}
@@ -375,11 +413,11 @@ func startUpdateCheck(cfg *Config) {
 			finish("No update staged locally, and the online check did not complete: "+err.Error(), nil)
 			return
 		}
-		if !versionNewer(latest.Version, appVersion) {
-			finish(fmt.Sprintf("You are up to date - this is v%s and the newest release is v%s.", appVersion, latest.Version), nil)
+		if !versionNewer(latest.effVersion(), appVersion) {
+			finish(fmt.Sprintf("You are up to date - this is v%s and the newest release is v%s.", appVersion, latest.effVersion()), nil)
 			return
 		}
-		msg := fmt.Sprintf("Update v%s is available from the AEGIS-Desktop repo. Click Install update to download it (SHA-256 verified) and run the installer - your Library is kept.", latest.Version)
+		msg := fmt.Sprintf("Update v%s is available from the AEGIS-Desktop repo. Click Install update to download it (SHA-256 verified) and run the installer - your Library is kept.", latest.effVersion())
 		if latest.Notes != "" {
 			msg += " Notes: " + latest.Notes
 		}
@@ -417,7 +455,7 @@ func startUpdateDownload(cfg *Config) {
 	}
 	latest := snap.latest
 	gUpdate.set(func(st *updateState) {
-		st.busy, st.phase, st.msg = true, "download", "Downloading update v"+latest.Version+"..."
+		st.busy, st.phase, st.msg = true, "download", "Downloading update v"+latest.effVersion()+"..."
 	})
 	go func() {
 		fail := func(err error) {
@@ -500,7 +538,7 @@ func startUpdateDownload(cfg *Config) {
 		gUpdate.set(func(st *updateState) {
 			st.busy, st.phase = false, ""
 			st.stagedPath = dst
-			st.msg = fmt.Sprintf("Update v%s downloaded and SHA-256 verified - click Install update to run it.", latest.Version)
+			st.msg = fmt.Sprintf("Update v%s downloaded and SHA-256 verified - click Install update to run it.", latest.effVersion())
 		})
 	}()
 }
@@ -512,14 +550,14 @@ func updateHealthLine() HealthItem {
 	case st.busy:
 		return HealthItem{"Updates", "checking the AEGIS-Desktop repo...", true, true}
 	case st.stagedPath != "":
-		return HealthItem{"Updates", "v" + st.latest.Version + " downloaded and ready - Settings -> Install update", false, true}
+		return HealthItem{"Updates", "v" + st.latest.effVersion() + " downloaded and ready - Settings -> Install update", false, true}
 	case st.haveRemote:
-		return HealthItem{"Updates", "v" + st.latest.Version + " available - Settings -> Check for updates", false, true}
+		return HealthItem{"Updates", "v" + st.latest.effVersion() + " available - Settings -> Check for updates", false, true}
 	case st.checked:
 		return HealthItem{"Updates", "up to date (v" + appVersion + "), checked against the repo", true, false}
 	default:
-		if latest, p, err := findUpdate(); err == nil && p != "" && versionNewer(latest.Version, appVersion) {
-			return HealthItem{"Updates", "v" + latest.Version + " staged in the Updates folder - Settings -> Install update", false, true}
+		if latest, p, err := findUpdate(); err == nil && p != "" && versionNewer(latest.effVersion(), appVersion) {
+			return HealthItem{"Updates", "v" + latest.effVersion() + " staged in the Updates folder - Settings -> Install update", false, true}
 		}
 		return HealthItem{"Updates", "not checked yet this run - Settings -> Check for updates", true, true}
 	}

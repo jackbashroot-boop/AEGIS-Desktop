@@ -35,9 +35,12 @@
 #include <map>
 #include <time.h>
 
-#define AGENT_VERSION "aegis-0.8.3"
-#define FIRMWARE_VER "AEGIS-PHX-v0.12.7-ADV"
-#define FW_VER_NUM "0.12.7"
+#define FIRMWARE_VER "AEGIS-PHX-v0.12.15-ADV"
+#define FW_VER_NUM "0.12.15"
+// Legacy console-link label: DERIVED from the real version (v0.12.13)
+// so it can never fossilise again - it sat at "aegis-0.8.3" for many
+// releases and made successful updates look like they never landed.
+#define AGENT_VERSION "aegis-" FW_VER_NUM
 
 // ---------------------------------------------------------- shared state
 static String g_wifiSsid = "";
@@ -253,6 +256,7 @@ static uint32_t lastHeartbeat = 0;
 
 // Rule engine + detectors + (optional) expansion drivers + SD vault.
 #include "board_config.h"
+#include "sensors.h"   // optional LD2410 mmWave + VL53L1X detect (v0.12.11)
 #include "rules.h"
 static RuleSet localRules;
 
@@ -1204,11 +1208,22 @@ static void liveTaskFn(void*) {
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) pingService();
     if (!g_liveEnabled || WiFi.status() != WL_CONNECTED) { delay(2000); continue; }
-    if (!g_deskHost.length()) { loadDesktopCfg(); delay(3000); continue; }
+    if (!g_deskHost.length()) {
+      loadDesktopCfg();
+      // v0.12.8: no saved PC address is not a dead end - shout for the
+      // Companion (it answers with an HMAC proof and the device saves
+      // the address itself). Previously this waited forever, so a
+      // blank/never-written host= line silently killed the link.
+      if (!g_deskHost.length() && millis() - g_lastDiscoverMs > 15000) {
+        g_lastDiscoverMs = millis();
+        discoverDesktop();
+      }
+      delay(2000); continue;
+    }
     if (!isLinkApproved(g_deskHost, g_deskPort)) { delay(2000); continue; }   // waits for ENTER on device
     WiFiClient c;
     if (!c.connect(g_deskHost.c_str(), g_deskPort, 4000)) {
-      if (millis() - g_lastDiscoverMs > 30000) {
+      if (millis() - g_lastDiscoverMs > 15000) {
         g_lastDiscoverMs = millis();
         if (discoverDesktop()) { delay(500); continue; }
       }
@@ -1263,6 +1278,12 @@ static void liveTaskFn(void*) {
         n += snprintf(frame + n, sizeof(frame) - n, ",\"gps_acc\":%.0f,\"gps_rej\":%lu",
                       (double)gpsAcc, (unsigned long)gnssHat.rejectedJumps);
       }
+      if (n > 0 && n < (int)sizeof(frame) - 72) {
+        // Presence sensors (v0.12.11): only sent when hardware answered.
+        if (g_csiOn) n += snprintf(frame + n, sizeof(frame) - n, ",\"csi\":%d,\"csi_mot\":%d", g_csiScore, g_csiPresent ? 1 : 0);
+        if (g_ld2410.everSeen) n += snprintf(frame + n, sizeof(frame) - n, ",\"ld2410\":%d,\"ld_cm\":%d", g_ld2410.present ? 1 : 0, g_ld2410.moving ? (int)g_ld2410.moveCm : (int)g_ld2410.stillCm);
+        else if (g_tofPresent) n += snprintf(frame + n, sizeof(frame) - n, ",\"tof\":1");
+      }
       if (s.pct >= 0 && n > 0 && n < (int)sizeof(frame) - 24) n += snprintf(frame + n, sizeof(frame) - n, ",\"pct\":%d", s.pct);
       if (n > 0 && n < (int)sizeof(frame) - 2) { frame[n++] = '}'; frame[n++] = '\n'; frame[n] = 0; }
       if (c.print(frame) == 0) break;
@@ -1288,7 +1309,7 @@ static String phxFileSha256(const char* path, uint32_t& sizeOut) {
   sizeOut = f.size();
   mbedtls_sha256_context ctx; mbedtls_sha256_init(&ctx); mbedtls_sha256_starts(&ctx, 0);
   uint8_t buf[1024]; size_t n;
-  while ((n = f.read(buf, sizeof(buf))) > 0) mbedtls_sha256_update(&ctx, buf, n);
+  while ((n = f.read(buf, sizeof(buf))) > 0) { mbedtls_sha256_update(&ctx, buf, n); esp_task_wdt_reset(); }
   uint8_t out[32]; mbedtls_sha256_finish(&ctx, out); mbedtls_sha256_free(&ctx);
   f.close();
   char hex[65]; for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", out[i]);
@@ -1369,10 +1390,37 @@ static int phxSyncSend(WiFiClient& c, const PhxSyncFile& sf) {
   if (!liveReadLine(c, ln)) return -1;
   return (ln.indexOf("\"stored\": true") >= 0 || ln.indexOf("\"stored\":true") >= 0) ? 1 : -1;
 }
+// SD library manifest (v0.12.10): /AEGIS/data/library.json says
+// exactly what this card holds (program, firmware, file sizes), so
+// the PC handoff is verifiable at a glance instead of guesswork.
+// Written before every sync; also small enough to read by eye.
+static void writeLibraryManifest() {
+  if (!sdLogMgr.mounted) return;
+  SD.mkdir("/AEGIS");
+  SD.mkdir("/AEGIS/data");
+  SD.mkdir("/AEGIS/logs");
+  File f = SD.open("/AEGIS/data/library.json", FILE_WRITE);
+  if (!f) return;
+  f.print("{\"prog\":\"PHOENIX\",\"fw\":\"" FW_VER_NUM "\",\"mac\":\"" + WiFi.macAddress() +
+          "\",\"uptime_s\":" + String(millis() / 1000) + ",\"files\":[");
+  bool first = true;
+  for (const auto& sf : kPhxSyncFiles) {
+    File q = SD.open(sf.path, FILE_READ);
+    const uint32_t sz = q ? (uint32_t)q.size() : 0;
+    if (q) q.close();
+    if (!first) f.print(",");
+    first = false;
+    f.print("{\"name\":\"" + String(sf.name) + "\",\"bytes\":" + String(sz) + "}");
+  }
+  f.print("]}");
+  f.close();
+}
+
 static bool runPhxSync() {
   if (!sdLogMgr.mounted) return false;
   writeDiagnosticsReport();   // self-diagnosis rides along for the PC to file + explain
   exportMaps();   // refresh geojson/csv/kml/gpx from the atlas first
+  writeLibraryManifest();   // say exactly what the card holds (v0.12.10)
   if (!g_deskHost.length()) { loadDesktopCfg(); if (!g_deskHost.length()) return false; }
   if (!isLinkApproved(g_deskHost, g_deskPort)) { drawCurrentView(); return false; }
   WiFiClient c;
@@ -1450,6 +1498,21 @@ void setup() {
   if (sdLogMgr.mounted) {
     sdLogMgr.appendLog("aegis_boot.log",
                        String("[BOOT] ") + FIRMWARE_VER + " mac=" + WiFi.macAddress());
+  }
+  // Startup radio profile in plain sight (v0.12.10): if Wi-Fi "just
+  // won't connect", this one line says why - passive offline left
+  // ON at shutdown used to look exactly like a Wi-Fi fault.
+  Serial.printf("[WIFI] startup profile: ssid=%s passive=%s live=%s autoSync=%s\n",
+                g_wifiSsid.length() ? "set" : "EMPTY",
+                g_passiveOffline ? "ON" : "off",
+                g_liveEnabled ? "on" : "off", g_autoSync ? "on" : "off");
+  if (sdLogMgr.mounted) {
+    sdLogMgr.appendLog("aegis_boot.log",
+                       String("[WIFI] startup passive=") + (g_passiveOffline ? "ON" : "off") +
+                       " ssid=" + (g_wifiSsid.length() ? "set" : "EMPTY"));
+  }
+  if (g_passiveOffline) {
+    g_scanStatus = "passive offline ON - WiFi will not join (SETUP > Passive offline)";
   }
   // Last line of defence (v0.7.7): if any single call ever wedges the
   // loop for 30 s (as the RFID I2C probe did), the task watchdog reboots
@@ -1581,12 +1644,24 @@ static void homeNetTick() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     g_autoJoinActive = false; g_wifiJoinGuard = false; g_autoJoinNextMs = 0;
+    static bool sleepOff = false;
+    if (!sleepOff) { sleepOff = true; WiFi.setSleep(false); }   // modem sleep was dropping the PC link
     g_homeJoinStatus = "CONNECTED " + WiFi.SSID() + " " + WiFi.localIP().toString();
     return;
   }
-  const bool busy = g_wifiScanRunning || g_bleScanRunning || g_lanScan.active || g_wardriveOn;
-  if (busy) return;                       // a scan already running finishes first
+  // v0.12.8: wardrive NO LONGER blocks the home join. Field report:
+  // drive home with wardrive still on and the device sat next to its
+  // own router forever, never joining, so nothing synced or linked.
+  // Wardrive logging rides the same radio fine once joined. A scan in
+  // flight only defers the join briefly - and a scan flag stuck "busy"
+  // for 25 s+ must never starve the join either.
   const uint32_t now = millis();
+  const bool busy = g_wifiScanRunning || g_bleScanRunning || g_lanScan.active;
+  static uint32_t busySinceMs = 0;
+  if (busy) {
+    if (!busySinceMs) busySinceMs = now;
+    if (now - busySinceMs < 25000) return;   // a running scan finishes first
+  } else busySinceMs = 0;
   if (g_autoJoinActive) {
     g_wifiJoinGuard = true; g_wifiJoinGuardUntilMs = g_autoJoinStartMs + 20000;
     if (now - g_autoJoinStartMs < 20000) {
@@ -1605,6 +1680,8 @@ static void homeNetTick() {
   }
   if ((int32_t)(now - g_autoJoinNextMs) < 0) return;
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);   // dropped link re-joins on its own (v0.12.8)
+  WiFi.disconnect(false);
   WiFi.begin(g_wifiSsid.c_str(), g_wifiPsk.c_str());
   g_autoJoinActive = true; g_autoJoinStartMs = now;
   g_wifiJoinGuard = true; g_wifiJoinGuardUntilMs = now + 20000;
@@ -1639,6 +1716,8 @@ static bool g_csiStarted = false;
 static float g_csiBase = 0;             // learned "calm room" variance
 static uint32_t g_csiLastTickMs = 0, g_csiLastEventMs = 0;
 static int g_csiHotSecs = 0;
+static float g_csiSmooth = 0;   // EMA of subcarrier spread (v0.12.11 hardening)
+static int g_csiCalmSecs = 0;   // consecutive below-exit-threshold seconds
 static bool csiBegin() {
   wifi_csi_config_t cfg = {};
   cfg.lltf_en = true; cfg.htltf_en = true; cfg.stbc_htltf2_en = true;
@@ -1670,13 +1749,19 @@ static void csiTick() {
   const float sd = sqrtf(var / 32.0f);
   if (g_csiBase < 1.0f) g_csiBase = sd > 1 ? sd : 20.0f;
   if (sd < g_csiBase * 1.6f) g_csiBase = g_csiBase * 0.95f + sd * 0.05f;   // learn only when calm
-  const float ratio = g_csiBase > 0 ? sd / g_csiBase : 1.0f;
+  // Hardened scoring (v0.12.11): judge the EMA-smoothed spread, not
+  // the raw 1 s sample; enter presence at >=45 sustained 2 s, leave
+  // only after 3 s below 30 (hysteresis) - real-time, no flicker.
+  if (g_csiSmooth < 1.0f) g_csiSmooth = sd; else g_csiSmooth = g_csiSmooth * 0.6f + sd * 0.4f;
+  const float ratio = g_csiBase > 0 ? g_csiSmooth / g_csiBase : 1.0f;
   int score = (int)((ratio - 1.0f) * 45.0f);
   g_csiScore = score < 0 ? 0 : (score > 100 ? 100 : score);
   const bool hot = g_csiScore >= 45 && g_csiPkts > 20;
   g_csiHotSecs = hot ? g_csiHotSecs + 1 : 0;
   const bool was = g_csiPresent;
-  g_csiPresent = g_csiHotSecs >= 2;
+  if (g_csiHotSecs >= 2) { g_csiPresent = true; g_csiCalmSecs = 0; }
+  else if (g_csiScore < 30) { if (++g_csiCalmSecs >= 3) g_csiPresent = false; }
+  else g_csiCalmSecs = 0;
   if (g_csiPresent && !was && now - g_csiLastEventMs > 300000) {
     g_csiLastEventMs = now;
     JsonDocument pd; JsonObject pf = pd.to<JsonObject>();
@@ -1754,7 +1839,7 @@ static String otaFileSha256(const char* path, uint32_t& sizeOut) {
   mbedtls_sha256_starts(&ctx, 0);
   uint8_t buf[1024];
   size_t n;
-  while ((n = f.read(buf, sizeof(buf))) > 0) mbedtls_sha256_update(&ctx, buf, n);
+  while ((n = f.read(buf, sizeof(buf))) > 0) { mbedtls_sha256_update(&ctx, buf, n); esp_task_wdt_reset(); }
   uint8_t out[32];
   mbedtls_sha256_finish(&ctx, out);
   mbedtls_sha256_free(&ctx);
@@ -1818,6 +1903,7 @@ static void runFirmwareUpdate() {
   uint32_t lastDraw = 0;
   bool aborted = false;
   while (http.connected() && (total == -1 || got < total)) {
+    esp_task_wdt_reset();   // a 1.6 MB TLS download may outlast the 30 s WDT (v0.12.14)
     const size_t avail = stream->available();
     if (avail) {
       const int want = avail > sizeof(buf) ? (int)sizeof(buf) : (int)avail;
@@ -1868,7 +1954,7 @@ if (!in || !Update.begin(fsize)) {
 }
 uint8_t fbuf[1024];
 size_t n;
-while ((n = in.read(fbuf, sizeof(fbuf))) > 0) Update.write(fbuf, n);
+while ((n = in.read(fbuf, sizeof(fbuf))) > 0) { Update.write(fbuf, n); esp_task_wdt_reset(); }
 in.close();
 if (Update.end(true) && Update.isFinished()) {
   SD.remove("/AEGIS/update.bin");
@@ -1930,6 +2016,7 @@ static void runLanFirmwareUpdate() {
   bool aborted = false;
   const uint32_t t0 = millis();
   while (got < total && millis() - t0 < 180000) {
+    esp_task_wdt_reset();   // LAN pull may outlast the 30 s WDT (v0.12.14)
     const size_t avail = c.available();
     if (avail) {
       size_t want = avail > sizeof(buf) ? sizeof(buf) : avail;
@@ -2163,14 +2250,48 @@ static void updateCheckTick() {
   }
 }
 
+// LoRa family beacon (v0.12.9): with TX at full +22 dBm, a PHOENIX
+// announces itself over the air every 10 min so other AEGIS LoRa
+// devices can hear it (with an RSSI range hint) - no Wi-Fi involved.
+// Battery cost is a ~0.3 s, ~120 mA burst per beacon: about
+// 0.6 mAh/day. Presence only; nothing secret is sent.
+static void loraBeaconTick() {
+  if (!loraHat.active || quarantined || g_passiveOffline || g_bootSafeMute) return;
+  static uint32_t lastBeaconMs = 0;
+  const uint32_t now = millis();
+  if (now < 90000) return;                              // let boot settle
+  if (lastBeaconMs && now - lastBeaconMs < 600000) return;
+  lastBeaconMs = now;
+  String mac = WiFi.macAddress(); mac.replace(":", "");
+  if (mac.length() > 6) mac = mac.substring(mac.length() - 6);
+  const String payload = "AEGIS1 PHOENIX " FW_VER_NUM " " + mac;
+  if (loraHat.transmit(payload))
+    Serial.printf("[LoRa] beacon sent: %s\n", payload.c_str());
+}
+
 void loop() {
   // Keyboard hardware first. agentLoop() used to run (and, every 20 s,
   // block in a scan) before this code ever saw a key.
   M5Cardputer.update();
   esp_task_wdt_reset();
   homeNetTick();
+  loraBeaconTick();
   updateCheckTick();
   csiTick();
+  sensorsTick(g_c5HotSwapEnabled);
+  { // LD2410 presence edge -> same event stream as CSI (v0.12.11)
+    static bool s_ldWas = false;
+    static uint32_t s_ldEvtMs = 0;
+    const bool ldPres = g_ld2410.present && (g_ld2410.moving || g_ld2410.still);
+    if (ldPres && !s_ldWas && millis() - s_ldEvtMs > 300000) {
+      s_ldEvtMs = millis();
+      JsonDocument pd; JsonObject pf = pd.to<JsonObject>();
+      pf["ld2410.move_cm"] = g_ld2410.moveCm;
+      pf["ld2410.still_cm"] = g_ld2410.stillCm;
+      pushEvent("presence_motion", "mmwave", "ld2410", "Presence detected nearby (mmWave LD2410)", pf);
+    }
+    s_ldWas = ldPres;
+  }
   wifiJoinTick();
   linkPromptTick();
   fwJobTick();
@@ -2285,6 +2406,7 @@ void loop() {
 
   if (!g_streakCleared && nowMs > 90000) {
     prefs.putUInt("bootStreak", 0);
+    prefs.putUInt("scCrash", 0);   // stable run forgives scan crashes (v0.12.15)
     g_bootSafeMute = false;
     if (g_diagMode) {   // stable run after a crash: diagnostics complete
       prefs.putBool("diag", false);
@@ -2316,4 +2438,8 @@ void loop() {
   // Sprite refresh is flicker-free; 1 s keeps uptime and SCAN state honest.
   if (!g_screenAsleep && nowMs - g_lastUiDraw > 1000) drawCurrentView();
   if (nowMs < 45000) markStage("idle");
+  // Idle yield (v0.12.10 streamlining): with no key pressed this
+  // frame, hand 1 ms to the Wi-Fi/BT stacks instead of spinning a
+  // hot loop - same responsiveness, less heat and battery.
+  if (!pressedNow) delay(1);
 }

@@ -12,22 +12,36 @@ import (
 	"time"
 
 	"gioui.org/layout"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 )
 
-func (u *UI) btn(click *widget.Clickable, txt string) material.ButtonStyle {
+// btnStyle wraps a material button so it always sizes to its own
+// text (v1.8.12): pages live inside full-width list items whose
+// minimum width used to stretch every button across the whole
+// window ("Back up now" spanning a maximised screen).
+type btnStyle struct{ material.ButtonStyle }
+
+func (b btnStyle) Layout(gtx layout.Context) layout.Dimensions {
+	gtx.Constraints.Min.X = 0
+	gtx.Constraints.Min.Y = 0
+	return b.ButtonStyle.Layout(gtx)
+}
+
+func (u *UI) btn(click *widget.Clickable, txt string) btnStyle {
 	b := material.Button(u.th, click, txt)
 	b.Background = colCyan
 	b.Color = u.th.Palette.ContrastFg
 	b.TextSize = 12.5
-	b.Inset = layout.Inset{Top: 7, Bottom: 7, Left: 12, Right: 12}
+	b.Inset = layout.Inset{Top: 7, Bottom: 7, Left: 14, Right: 14}
 	b.CornerRadius = 8
-	return b
+	return btnStyle{b}
 }
 
-func (u *UI) btnGhost(click *widget.Clickable, txt string) material.ButtonStyle {
+func (u *UI) btnGhost(click *widget.Clickable, txt string) btnStyle {
 	b := u.btn(click, txt)
 	b.Background = colPanel2
 	b.Color = colText
@@ -57,14 +71,28 @@ func (u *UI) field(ed *widget.Editor, hint string) layout.Widget {
 
 func sectionTitle(u *UI, txt string) layout.FlexChild {
 	return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-		return layout.Inset{Top: 14, Bottom: 6}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-			return u.bold(13.5, colText, txt).Layout(gtx)
+		return layout.Inset{Top: 22, Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			return bgFill(gtx, colPanel2, 8, pad(9, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						paint.FillShape(gtx.Ops, colCyan, clip.Rect{Max: image.Pt(gtx.Dp(3), gtx.Dp(15))}.Op())
+						return layout.Dimensions{Size: image.Pt(gtx.Dp(3), gtx.Dp(15))}
+					}),
+					layout.Rigid(hSpace(9)),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.bold(13.5, colText, txt).Layout(gtx)
+					}),
+				)
+			}))
 		})
 	})
 }
 
 func caption(u *UI, txt string) layout.FlexChild {
 	return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		if u.compactSet { // streamlined Settings (v1.8.8): prose hidden
+			return layout.Dimensions{}
+		}
 		return u.label(11.5, colDim, txt).Layout(gtx)
 	})
 }
@@ -535,6 +563,9 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 	if u.btnRegenTok.Clicked(gtx) {
 		cfg.Token = newToken()
 		_ = cfg.Save()
+		if u.core.Disco != nil {
+			u.core.Disco.SetToken(cfg.Token) // discovery used to keep the old token forever (v1.8.6)
+		}
 		u.settingsMsg = "New token generated. Devices will be REJECTED until you re-write AEGIS_LINK/desktop.txt to their SD cards (button below)."
 		u.core.Log.Warnf("sync token regenerated from Settings - SD cards need the new desktop.txt")
 	}
@@ -582,6 +613,11 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		startUpdateCheck(cfg)
 		u.core.Log.Infof("update check started (local Updates folder + feed %s)", cfg.UpdateFeed)
 	}
+	if u.btnUpdateLater.Clicked(gtx) {
+		u.updateLater = true
+		u.settingsMsg = "OK - the update waits. It will be offered again next time you open the Companion, or install it any time from here."
+		u.core.Log.Infof("user deferred staged Companion update")
+	}
 	if u.btnInstallUpdate.Clicked(gtx) {
 		st := updateSnapshot()
 		if u.updatePath == "" {
@@ -598,7 +634,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		case st.haveRemote:
 			u.toastGood("Downloading the update - progress bar below, SHA-256 verified before anything runs.", 5)
 			startUpdateDownload(cfg)
-			u.core.Log.Infof("update download started for v%s", st.latest.Version)
+			u.core.Log.Infof("update download started for v%s", st.latest.effVersion())
 		default:
 			u.settingsMsg = "Check for updates first - no staged installer to run."
 		}
@@ -697,6 +733,47 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		}
 		u.core.Log.Infof("minimize-to-tray set to %v from Settings", cfg.MinToTray)
 	}
+	if u.btnLocDeny.Clicked(gtx) {
+		cfg.LocationAsked = true
+		_ = cfg.Save()
+		u.settingsMsg = "OK - no lookup was made, nothing was saved, and I will not ask again. The ZIP code or latitude/longitude fields below work any time."
+		u.core.Log.Infof("PC location consent: denied")
+	}
+	if u.btnLocManual.Clicked(gtx) {
+		cfg.LocationAsked = true
+		_ = cfg.Save()
+		u.settingsMsg = "No problem - use the ZIP code or latitude/longitude fields below. Nothing was looked up."
+	}
+	if u.btnLocAllow.Clicked(gtx) && !u.locBusy {
+		u.locBusy = true
+		u.settingsMsg = "Looking up this computer's approximate location..."
+		go func() {
+			defer func() { u.locBusy = false }()
+			ctx, cancel := context.WithTimeout(context.Background(), 18*time.Second)
+			defer cancel()
+			loc, err := fetchIPLocation(ctx)
+			if err != nil {
+				u.settingsMsg = "Location lookup failed: " + err.Error()
+				u.core.Log.Warnf("PC location lookup failed: %v", err)
+				return
+			}
+			cfg.HomeLat, cfg.HomeLon = loc.Lat, loc.Lon
+			cfg.HomePlace = loc.Place + " (approximate)"
+			cfg.HomeAccuracyM, cfg.HomeSource = 5000, "This computer's internet location (approximate)"
+			cfg.LocationAsked = true
+			if err := cfg.Save(); err != nil {
+				u.settingsMsg = "Found " + loc.Place + " but could not save it: " + err.Error()
+				return
+			}
+			u.homeLatEd.SetText(fmt.Sprintf("%.5f", loc.Lat))
+			u.homeLonEd.SetText(fmt.Sprintf("%.5f", loc.Lon))
+			u.settingsMsg = fmt.Sprintf("Home set to %s (%.5f, %.5f) - city-level approximate from this internet connection, not your rooftop. Saving the %s offline map around it now (progress below / on the Wardrive Map page). Refine any time: ZIP, typed coordinates, or GPS-refine after wardriving.", loc.Place, loc.Lat, loc.Lon, cfg.areaSizeLabel())
+			u.core.Log.Infof("home location set from PC lookup: %s %.5f, %.5f (approximate)", loc.Place, loc.Lat, loc.Lon)
+			u.areaProg.StartR(cfg.Library, loc.Lat, loc.Lon, cfg.Token, cfg.homeHalfMiles(), func() {
+				u.tiles, u.tilesBusy = nil, ""
+			})
+		}()
+	}
 	if u.btnSaveZip.Clicked(gtx) {
 		zip, zerr := normalizeZip(u.homeZipEd.Text())
 		if zerr != nil {
@@ -739,7 +816,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			if err := cfg.Save(); err != nil {
 				u.settingsMsg = "Could not save the home location: " + err.Error()
 			} else {
-				u.settingsMsg = fmt.Sprintf("Home set to %.5f, %.5f (typed coordinates; recorded as ±15 m, so use an exact dropped pin rather than a town centre). Now save the 100x100-mile offline map around it (button below, or on the Wardrive Map page).", lat, lon)
+				u.settingsMsg = fmt.Sprintf("Home set to %.5f, %.5f (typed coordinates; recorded as ±15 m, so use an exact dropped pin rather than a town centre). Now save the "+cfg.areaSizeLabel()+" offline map around it (button below, or on the Wardrive Map page).", lat, lon)
 				u.core.Log.Infof("home location set to %.5f, %.5f", lat, lon)
 			}
 		}
@@ -766,7 +843,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			}
 			u.homeLatEd.SetText(fmt.Sprintf("%.5f", lat))
 			u.homeLonEd.SetText(fmt.Sprintf("%.5f", lon))
-			u.settingsMsg = fmt.Sprintf("Home GPS-refined from %d combined fixes of %q: %.5f, %.5f (about ±%.0f m). If you had already saved the 100x100-mile map around an older centre, save it again around this one.", fixes, ssid, lat, lon, uncertaintyM)
+			u.settingsMsg = fmt.Sprintf("Home GPS-refined from %d combined fixes of %q: %.5f, %.5f (about ±%.0f m). If you had already saved the home map around an older centre, save it again around this one.", fixes, ssid, lat, lon, uncertaintyM)
 			u.core.Log.Infof("home GPS-refined from %d fixes of %q -> %.5f, %.5f ±%.0f m", fixes, ssid, lat, lon, uncertaintyM)
 		}()
 	}
@@ -786,7 +863,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		if cfg.HomeLat == 0 && cfg.HomeLon == 0 {
 			u.settingsMsg = "Set the home location above first - the saved map is drawn around it."
 		} else {
-			u.areaProg.Start(cfg.Library, cfg.HomeLat, cfg.HomeLon, cfg.Token, func() {
+			u.areaProg.StartR(cfg.Library, cfg.HomeLat, cfg.HomeLon, cfg.Token, cfg.homeHalfMiles(), func() {
 				u.tiles, u.tilesBusy = nil, ""
 			})
 			u.settingsMsg = "Saving the home map in the background - progress is on the Wardrive Map page and below. You can keep working; it resumes if stopped."
@@ -866,8 +943,25 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		ipNote = "This computer's address(es): " + strings.Join(ips, ", ") + ". The filled-in one is on your Cardputers' network when they have been found; the address must match the network your devices are on (same first three numbers as the device IP)."
 	}
 
+	if u.tabRows.get("compactset").Clicked(gtx) {
+		u.compactSet = !u.compactSet
+		if u.compactSet {
+			u.toastGood("Streamlined Settings: explanatory prose hidden. Toggle again to bring it back.", 5)
+		}
+	}
 	form := []layout.FlexChild{
-		sectionTitle(u, "Listener"),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return material.Clickable(gtx, u.tabRows.get("compactset"), func(gtx layout.Context) layout.Dimensions {
+				return bgFill(gtx, colPanel, 8, pad(8, func(gtx layout.Context) layout.Dimensions {
+					mode := "Full explanations"
+					if u.compactSet {
+						mode = "Streamlined (prose hidden)"
+					}
+					return u.bold(12, colCyan, "Settings view: "+mode+" - click to switch").Layout(gtx)
+				}))
+			})
+		}),
+		sectionTitle(u, "Connection — listener"),
 		caption(u, "Cardputers connect here to sync logs and stream live status. Default 8791 - must match desktop.txt on the cards."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
@@ -882,7 +976,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				}),
 			)
 		}),
-		sectionTitle(u, "Dashboard window"),
+		sectionTitle(u, "This program — window & tray"),
 		caption(u, "With the tray on, closing the window tucks Aegis Companion into the system tray instead of quitting - the device link, live data and update checks keep running in the background. Right-click the tray icon to reopen the dashboard or quit for real."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
@@ -956,7 +1050,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				}),
 			)
 		}),
-		sectionTitle(u, "Program"),
+		sectionTitle(u, "This program — shortcut & folders"),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -973,7 +1067,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 		caption(u, "The shortcut points at this very program file - keep the folder where it is afterwards. Library: "+cfg.Library),
-		sectionTitle(u, "Publish firmware to GitHub"),
+		sectionTitle(u, "Updates — publish firmware"),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -982,19 +1076,60 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 		caption(u, "Uploads the staged, SHA-verified PHOENIX image + a fresh phoenix-latest.json onto this repo's latest release, using your own GitHub CLI login (gh auth login). The app never sees your token. After publishing, Cardputers can pull the update and this PC's Dashboard will offer to push it."),
-		sectionTitle(u, "Home presence (this PC's Wi-Fi radio)"),
+		sectionTitle(u, "Presence — who is home"),
 		caption(u, "Your home Wi-Fi name (SSID) - motion ripple of its signal = movement in the house:"),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.field(&u.homeSSIDEd, "e.g. Duffwifi")(gtx)
 		}),
-		caption(u, "Who's-home devices, one per line as Name=MAC (find a phone's MAC in its Wi-Fi settings; your Cardputers appear automatically):"),
+		caption(u, "Who's-home devices: pick them from the devices this PC has seen on your network (below - name and MAC shown, no hunting through phone menus), or type Name=MAC lines by hand. Your Cardputers appear automatically either way:"),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.field(&u.homeDevEd, "Dad phone=AA:BB:CC:DD:EE:FF")(gtx)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return u.whoHomePicker(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.btn(&u.btnSavePresence, "Save presence settings").Layout(gtx)
 		}),
-		sectionTitle(u, "Updates & removal"),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			// Update-ready prompt (v1.8.9): never restart under the
+			// user uninvited. Offer Restart now / Later; Later snoozes
+			// until the next launch.
+			st := updateSnapshot()
+			ready := u.updatePath != "" || st.stagedPath != ""
+			if !ready || u.updateLater {
+				return layout.Dimensions{}
+			}
+			ver := st.latest.effVersion()
+			if ver == "" {
+				ver = "new"
+			}
+			return bgFill(gtx, colPanel2, 10, pad(12, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.bold(13, colText, "Update ready - Companion v"+ver+" is downloaded and verified").Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(12, colDim, "Restart now to finish, or Later if you're mid-task - nothing restarts without you. Your Library and settings are kept either way.").Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 8) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btn(&u.btnInstallUpdate, "Restart now to update").Layout(gtx)
+							}),
+							layout.Rigid(hSpace(10)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btnGhost(&u.btnUpdateLater, "Later").Layout(gtx)
+							}),
+						)
+					}),
+				)
+			}))
+		}),
+		sectionTitle(u, "Updates — this program"),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1078,239 +1213,75 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 			)
 		}),
 		sectionTitle(u, "The family - who connects to this hub, and how"),
-		caption(u, "Each program has its own job and its own artwork. Linked ones find this PC themselves; TALON and KEEPER never link, by design."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("PHOENIX")
+			// Compact (v1.8.9): this used to be eight full cards of
+			// scroll. Each program's Dashboard tab now carries the
+			// same info with live state - here is the one-line map.
 			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "PHOENIX", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
+				rows := make([]layout.FlexChild, 0, len(familyOrder))
+				for _, prog := range familyOrder {
+					prog := prog
+					rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						info := infoFor(prog)
+						return layout.Inset{Bottom: 3}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									return u.artBadge(gtx, prog, 0.95)
+								}),
+								layout.Rigid(hSpace(8)),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return u.label(11.5, colText, info.Title+" · "+info.Device+" - "+info.Role).Layout(gtx)
+								}),
+							)
+						})
+					}))
+				}
+				rows = append(rows, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(11, colFaint, "Full detail + live state: click a program on the Dashboard. TALON and KEEPER never link, by design.").Layout(gtx)
+				}))
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx, rows...)
 			}))
 		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("SCRIBE")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "SCRIBE", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("HEARTH")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "HEARTH", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("HERALD")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "HERALD", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("BENCH")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "BENCH", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("LANTERN")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "LANTERN", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("KEEPER")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "KEEPER", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			info := infoFor("TALON")
-			return bgFill(gtx, colPanel, 8, pad(10, func(gtx layout.Context) layout.Dimensions {
-				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-						return u.artBadge(gtx, "TALON", 1.9)
-					}),
-					layout.Rigid(hSpace(12)),
-					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.bold(12.5, colText, info.Title+" · "+info.Device).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11.5, colDim, info.Role).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colCyan, "Connects: "+info.Connect).Layout(gtx)
-							}),
-							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-								return u.label(11, colFaint, "Sends here: "+info.Sends).Layout(gtx)
-							}),
-						)
-					}),
-				)
-			}))
-		}),
-		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		sectionTitle(u, "Wardrive map"),
+		sectionTitle(u, "Home location & offline map"),
 		caption(u, "The Wardrive Map page shows real street maps by default (OpenStreetMap tiles, downloaded once and cached in the Library - currently "+humanBytes(u.tileBytes(cfg.Library))+"). The schematic plot is the offline fallback. Clearing the cache only costs a re-download."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.btnGhost(&u.btnClearTiles, "Clear map tile cache").Layout(gtx)
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
-		caption(u, "Saved home map: set your home location, then save a 100x100-mile square of street map around it (zoom levels 10-14, one polite download, roughly 150 MB). Wardrives inside that square then draw their real street map straight from disk - no internet, no web call - and your drives stay easy to browse offline. Saving resumes if stopped, and re-running fills any gaps."),
-		caption(u, "Home location: type a US ZIP code (one internet lookup, then it is saved as coordinates) OR type latitude/longitude directly - whichever you prefer."),
+		caption(u, "Saved home map: set your home location, pick a size below (20x20, 50x50 or 100x100 miles), then save that square of street map around it (zoom levels 10-14, one polite download - the size estimate is beside the button). Wardrives inside that square then draw their real street map straight from disk - no internet, no web call - and your drives stay easy to browse offline. Saving resumes if stopped, and re-running fills any gaps."),
+		caption(u, "Home location: let this program look it up (asks first, below), type a US ZIP code (one internet lookup, then it is saved as coordinates), OR type latitude/longitude directly - whichever you prefer."),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			if (cfg.HomeLat != 0 || cfg.HomeLon != 0) || cfg.LocationAsked {
+				return layout.Dimensions{}
+			}
+			return bgFill(gtx, colPanel, 10, pad(12, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.bold(12.5, colText, "Set home from this computer's location?").Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 4) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return u.label(11.5, colDim, "With your OK, the program asks a public lookup service (ipapi.co) where this internet connection appears to be - city-level, often a few km off. Only your public IP is involved, the way any website already sees it; nothing about this PC, your files or your devices is sent. The result is saved as home only if you allow it, the offline map of the size picked below then downloads around it, and you can refine or replace it any time. Say no and it will not ask again.").Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 8) }),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btn(&u.btnLocAllow, "Use approximate location").Layout(gtx)
+							}),
+							layout.Rigid(hSpace(8)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btnGhost(&u.btnLocManual, "Type ZIP / coordinates instead").Layout(gtx)
+							}),
+							layout.Rigid(hSpace(8)),
+							layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+								return u.btnGhost(&u.btnLocDeny, "No thanks").Layout(gtx)
+							}),
+						)
+					}),
+				)
+			}))
+		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1380,10 +1351,46 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 		}),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					return u.label(12, colDim, "Offline map size:").Layout(gtx)
+				}),
+				layout.Rigid(hSpace(8)),
+				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+					sel := 2
+					switch cfg.HomeRadiusMi {
+					case 20:
+						sel = 0
+					case 50:
+						sel = 1
+					}
+					opts := []string{"20 × 20 miles — neighbourhood + nearby towns", "50 × 50 miles — county-wide", "100 × 100 miles — regional"}
+					return u.dropMenu(gtx, "mapsize", opts[sel], opts, sel, func(i int) {
+						sizes := []int{20, 50, 100}
+						cfg.HomeRadiusMi = sizes[i]
+						if err := cfg.Save(); err != nil {
+							u.settingsMsg = "Could not save the map size: " + err.Error()
+						} else {
+							u.settingsMsg = "Offline map size set to " + cfg.areaSizeLabel() + ". Save (or re-save) the home map below to download that square; a bigger square resumes where the old one left off."
+						}
+					})
+				}),
+				layout.Rigid(hSpace(10)),
+				layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+					if cfg.HomeLat == 0 && cfg.HomeLon == 0 {
+						return u.label(11, colFaint, "Set home first; the size applies to the next save.").Layout(gtx)
+					}
+					n, _ := AreaTilePlanR(cfg.HomeLat, cfg.HomeLon, cfg.homeHalfMiles())
+					return u.label(11, colFaint, fmt.Sprintf("About %d squares, roughly %s, at that size.", n, humanBytes(int64(n)*15000))).Layout(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			running, done, total, _, _, _ := u.areaProg.Snapshot()
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-					return u.btn(&u.btnSaveArea, "Save 100x100-mile home map").Layout(gtx)
+					return u.btn(&u.btnSaveArea, "Save home map ("+cfg.areaSizeLabel()+")").Layout(gtx)
 				}),
 				layout.Rigid(hSpace(8)),
 				layout.Rigid(func(gtx layout.Context) layout.Dimensions {
@@ -1396,7 +1403,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 						status = fmt.Sprintf("Home map saved %s: %d squares, %s on disk, zooms %d-%d around %.4f, %.4f.",
 							area.SavedAt, area.Tiles, humanBytes(area.Bytes), area.MinZoom, area.MaxZoom, area.HomeLat, area.HomeLon)
 					} else if cfg.HomeLat != 0 || cfg.HomeLon != 0 {
-						n, _ := AreaTilePlan(cfg.HomeLat, cfg.HomeLon)
+						n, _ := AreaTilePlanR(cfg.HomeLat, cfg.HomeLon, cfg.homeHalfMiles())
 						status = fmt.Sprintf("Home is set. Saving will fetch about %d squares once (about %s).", n, humanBytes(int64(n)*15000))
 					}
 					if running {
@@ -1424,7 +1431,7 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 				}),
 			)
 		}),
-		sectionTitle(u, "About"),
+		sectionTitle(u, "About & help"),
 		caption(u, "AEGIS Companion "+appVersion+" · protocol AEGIS/1 · Cardputers stay lean collectors; this program verifies, files and explains. TALON is never linked, by design. Nothing here phones home."),
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			return u.btnGhost(&u.btnReadiness, "Save field readiness report").Layout(gtx)
@@ -1467,3 +1474,185 @@ func (u *UI) pageSettings(gtx layout.Context) layout.Dimensions {
 }
 
 var _ = unit.Dp(0)
+
+// ---- who's-home device picker (v1.8.12) ------------------------------
+
+// homeDevicesText renders people back to the saved "Name=MAC" lines.
+func homeDevicesText(people []homePerson) string {
+	lines := make([]string, 0, len(people))
+	for _, p := range people {
+		lines = append(lines, p.Name+"="+p.MAC)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// toggleWhoHome adds/removes one census device in the people list.
+// The display name is the census name, else the vendor guess, else
+// the Aegis program, else the IP - always beside the MAC, which is
+// the identity that matters.
+func toggleWhoHome(people []homePerson, dv netDev) []homePerson {
+	mac := strings.ToUpper(dv.MAC)
+	for i, p := range people {
+		if p.MAC == mac {
+			return append(people[:i], people[i+1:]...)
+		}
+	}
+	name := dv.Name
+	if name == "" && dv.Aegis != "" {
+		name = dv.Aegis + " (Aegis device)"
+	}
+	if name == "" && dv.Vendor != "" && dv.Vendor != "unknown vendor" {
+		name = dv.Vendor + " device"
+	}
+	if name == "" {
+		name = "Device " + dv.IP
+	}
+	return append(people, homePerson{Name: name, MAC: mac})
+}
+
+// whoHomePicker lets the user choose who's-home devices from the
+// network census - connected and known devices, each shown with
+// its MAC - instead of hunting MAC addresses by hand. Ticking a
+// row rewrites the Name=MAC editor above it, so the saved format
+// (and the presence engine) is completely unchanged.
+func (u *UI) whoHomePicker(gtx layout.Context) layout.Dimensions {
+	devs := netSnapshot()
+	people := parseHomeDevices(u.homeDevEd.Text())
+	chosen := map[string]bool{}
+	for _, p := range people {
+		chosen[p.MAC] = true
+	}
+	if u.tabRows.get("whopick").Clicked(gtx) {
+		u.whoPickOpen = !u.whoPickOpen
+	}
+	inCensus := map[string]bool{}
+	for _, dv := range devs {
+		if dv.MAC != "" {
+			inCensus[strings.ToUpper(dv.MAC)] = true
+		}
+	}
+	if u.whoPickOpen {
+		for _, dv := range devs {
+			mac := strings.ToUpper(dv.MAC)
+			if mac == "" {
+				continue
+			}
+			if u.tabRows.get("who:" + mac).Clicked(gtx) {
+				u.homeDevEd.SetText(homeDevicesText(toggleWhoHome(people, dv)))
+				people = parseHomeDevices(u.homeDevEd.Text())
+			}
+		}
+		for _, p := range people {
+			if inCensus[p.MAC] {
+				continue
+			}
+			if u.tabRows.get("who:" + p.MAC).Clicked(gtx) {
+				kept := people[:0]
+				for _, q := range people {
+					if q.MAC != p.MAC {
+						kept = append(kept, q)
+					}
+				}
+				u.homeDevEd.SetText(homeDevicesText(kept))
+				people = parseHomeDevices(u.homeDevEd.Text())
+			}
+		}
+		// refresh ticks after any toggle this frame
+		chosen = map[string]bool{}
+		for _, p := range people {
+			chosen[p.MAC] = true
+		}
+	}
+
+	arrow := "▸"
+	if u.whoPickOpen {
+		arrow = "▾"
+	}
+	children := []layout.FlexChild{
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return material.Clickable(gtx, u.tabRows.get("whopick"), func(gtx layout.Context) layout.Dimensions {
+				return bgFill(gtx, colPanel, 8, pad(9, func(gtx layout.Context) layout.Dimensions {
+					return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+						layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+							return u.bold(12, colText, arrow+"  Pick from devices on your network").Layout(gtx)
+						}),
+						layout.Rigid(hSpace(10)),
+						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+							return u.label(11, colFaint, fmt.Sprintf("%d seen (live + known) · %d picked — tick a phone/TV and it counts as someone home", len(devs), len(people))).Layout(gtx)
+						}),
+					)
+				}))
+			})
+		}),
+	}
+	if u.whoPickOpen {
+		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions { return vSpace(gtx, 6) }))
+		if len(devs) == 0 && len(people) == 0 {
+			children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return u.label(11.5, colDim, "No network devices seen yet - the census on the Dashboard Overview fills this in within a minute of the program running. You can still type Name=MAC above.").Layout(gtx)
+			}))
+		}
+		row := func(key, title, sub string, on bool) layout.FlexChild {
+			return layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Inset{Bottom: 5}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+					return material.Clickable(gtx, u.tabRows.get("who:"+key), func(gtx layout.Context) layout.Dimensions {
+						bg := colPanel
+						if on {
+							bg = colPanel2
+						}
+						return bgFill(gtx, bg, 8, pad(8, func(gtx layout.Context) layout.Dimensions {
+							return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									mark, col := "○", colDim
+									if on {
+										mark, col = "✓", colGreen
+									}
+									return u.bold(13, col, mark).Layout(gtx)
+								}),
+								layout.Rigid(hSpace(9)),
+								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+									return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											return u.bold(12, colText, title).Layout(gtx)
+										}),
+										layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+											return u.label(11, colDim, sub).Layout(gtx)
+										}),
+									)
+								}),
+							)
+						}))
+					})
+				})
+			})
+		}
+		for _, dv := range devs {
+			mac := strings.ToUpper(dv.MAC)
+			if mac == "" {
+				continue
+			}
+			title := dv.Name
+			if title == "" && dv.Aegis != "" {
+				title = dv.Aegis + " (Aegis device)"
+			}
+			if title == "" {
+				title = dv.Vendor
+			}
+			sub := mac + " · " + dv.IP
+			if dv.Vendor != "" && title != dv.Vendor {
+				sub += " · " + dv.Vendor
+			}
+			if !dv.Last.IsZero() {
+				sub += " · last seen " + dv.Last.Format("15:04")
+			}
+			children = append(children, row(mac, title, sub, chosen[mac]))
+		}
+		for _, p := range people {
+			if inCensus[p.MAC] {
+				continue
+			}
+			children = append(children, row(p.MAC, p.Name, p.MAC+" · saved · not seen on the network right now", true))
+		}
+	}
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, children...)
+}

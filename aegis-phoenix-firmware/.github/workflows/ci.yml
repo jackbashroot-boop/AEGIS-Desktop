@@ -1,0 +1,26 @@
+name: CI (Windows / macOS / Linux)
+on: [push, pull_request]
+permissions: { contents: read }
+jobs:
+  host-tests:
+    strategy:
+      fail-fast: false
+      matrix: { os: [ubuntu-latest, windows-latest, macos-latest] }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keyboard FSM host test (C++17, no embedded toolchain)
+        shell: bash
+        run: |
+          g++ -std=c++17 -Wall -Wextra -I src tools/host_tests/test_key_fsm.cpp -o host_test
+          ./host_test || ./host_test.exe
+  firmware-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install PlatformIO and build (downloads toolchain once, in CI)
+        run: |
+          pip install platformio
+          pio run -e cardputer-adv
